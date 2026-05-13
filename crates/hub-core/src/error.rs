@@ -34,6 +34,8 @@ pub enum HubError {
         name: String,
         version: String,
     },
+    #[error("database error: {message}")]
+    Database { message: String },
 }
 
 pub type HubResult<T> = Result<T, HubError>;

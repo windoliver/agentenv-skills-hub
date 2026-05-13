@@ -5,12 +5,14 @@ use hub_core::{
         Visibility,
     },
 };
+use semver::Version;
 use sqlx::{PgPool, Row};
+use std::cmp::Ordering;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 const SELECT_SKILL_VERSION: &str =
-    "SELECT sv.id, s.namespace, s.name, sv.version, s.description, sv.digest,
+    "SELECT sv.id, s.namespace, s.name, sv.version, sv.manifest_json ->> 'description' AS description, sv.digest,
         sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
         sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
  FROM skill_versions sv
@@ -180,32 +182,74 @@ impl PgHubRepository {
         Ok(())
     }
 
+    pub async fn unyank_version(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> HubResult<()> {
+        let rows = sqlx::query(
+            "UPDATE skill_versions sv
+             SET yanked_at = NULL, yank_reason = NULL
+             FROM skills s
+             WHERE sv.skill_id = s.id AND s.namespace = $1 AND s.name = $2 AND sv.version = $3",
+        )
+        .bind(namespace)
+        .bind(name)
+        .bind(version)
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?
+        .rows_affected();
+        if rows == 0 {
+            return Err(HubError::SkillVersionNotFound {
+                namespace: namespace.to_owned(),
+                name: name.to_owned(),
+                version: version.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn compatibility_index(&self, registry: &str) -> HubResult<CompatibilityIndex> {
         let rows = sqlx::query(
-            "SELECT s.name, sv.version, s.description, sv.digest, sv.signature_ed25519, sv.public_key_ed25519
+            "SELECT s.name, sv.version, sv.manifest_json ->> 'description' AS description,
+                    sv.digest, sv.signature_ed25519, sv.public_key_ed25519
              FROM skills s
              JOIN skill_versions sv ON sv.skill_id = s.id
              WHERE s.visibility = 'public' AND sv.yanked_at IS NULL
-             ORDER BY s.name ASC, sv.version ASC",
+             ORDER BY s.name ASC",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(db_error)?;
 
-        Ok(CompatibilityIndex {
-            skills: rows
-                .into_iter()
-                .map(|row| CompatibilitySkillHit {
-                    name: row.get("name"),
-                    version: row.get("version"),
-                    description: row.get("description"),
-                    registry: registry.to_owned(),
-                    digest: Some(row.get("digest")),
-                    signature_ed25519: row.get("signature_ed25519"),
-                    public_key_ed25519: row.get("public_key_ed25519"),
-                })
-                .collect(),
-        })
+        let mut skills = rows
+            .into_iter()
+            .map(|row| CompatibilitySkillHit {
+                name: row.get("name"),
+                version: row.get("version"),
+                description: row.get("description"),
+                registry: registry.to_owned(),
+                digest: Some(row.get("digest")),
+                signature_ed25519: row.get("signature_ed25519"),
+                public_key_ed25519: row.get("public_key_ed25519"),
+            })
+            .collect::<Vec<_>>();
+        skills.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| compare_versions(&left.version, &right.version))
+        });
+
+        Ok(CompatibilityIndex { skills })
+    }
+}
+
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    match (Version::parse(left), Version::parse(right)) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
     }
 }
 
@@ -236,8 +280,7 @@ fn visibility_text(visibility: Visibility) -> &'static str {
 }
 
 fn db_error(source: sqlx::Error) -> HubError {
-    HubError::InvalidArtifactUrl {
-        value: "database".to_owned(),
+    HubError::Database {
         message: source.to_string(),
     }
 }
