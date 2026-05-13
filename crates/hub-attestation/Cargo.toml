@@ -1,0 +1,13 @@
+[package]
+name = "hub-attestation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+hub-core = { path = "../hub-core" }
+serde_json.workspace = true
+thiserror.workspace = true

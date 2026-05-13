@@ -1,0 +1,23 @@
+[package]
+name = "hub-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+hub-attestation = { path = "../hub-attestation" }
+hub-core = { path = "../hub-core" }
+hub-index = { path = "../hub-index" }
+hub-search = { path = "../hub-search" }
+hub-storage = { path = "../hub-storage" }
+hub-webhooks = { path = "../hub-webhooks" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
