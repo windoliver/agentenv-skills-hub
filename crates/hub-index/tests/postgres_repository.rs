@@ -63,6 +63,36 @@ async fn repository_inserts_versions_and_builds_compatibility_index() {
 }
 
 #[tokio::test]
+async fn repository_returns_persisted_record_for_duplicate_same_digest_publish() {
+    let _guard = TEST_LOCK.lock().await;
+    let pool = PgPool::connect(&database_url()).await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    sqlx::query("TRUNCATE webhook_deliveries, webhook_subscriptions, api_tokens, permissions, skill_embeddings, skill_versions, skills RESTART IDENTITY CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let repo = PgHubRepository::new(pool);
+    let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let request = signed_request("code-review", "1.2.0", digest);
+    let first = repo
+        .insert_version("community", Visibility::Public, "alice", &request)
+        .await
+        .unwrap();
+    let second = repo
+        .insert_version("community", Visibility::Public, "alice", &request)
+        .await
+        .unwrap();
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.digest, digest);
+
+    let index = repo.compatibility_index("community").await.unwrap();
+    assert_eq!(index.skills.len(), 1);
+    assert_eq!(index.skills[0].digest.as_deref(), Some(digest));
+}
+
+#[tokio::test]
 async fn repository_yank_removes_version_from_compatibility_index() {
     let _guard = TEST_LOCK.lock().await;
     let pool = PgPool::connect(&database_url()).await.unwrap();

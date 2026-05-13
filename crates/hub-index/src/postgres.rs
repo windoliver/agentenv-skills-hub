@@ -62,13 +62,19 @@ impl PgHubRepository {
             skill_id
         };
 
-        let conflict =
-            sqlx::query("SELECT digest FROM skill_versions WHERE skill_id = $1 AND version = $2")
-                .bind(actual_skill_id)
-                .bind(&request.manifest.version)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_error)?;
+        let conflict = sqlx::query(
+            "SELECT sv.id, s.namespace, s.name, sv.version, s.description, sv.digest,
+                    sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
+                    sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
+             FROM skill_versions sv
+             JOIN skills s ON s.id = sv.skill_id
+             WHERE sv.skill_id = $1 AND sv.version = $2",
+        )
+        .bind(actual_skill_id)
+        .bind(&request.manifest.version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?;
         if let Some(row) = conflict {
             let existing: String = row.get("digest");
             if existing != request.artifact.digest {
@@ -78,6 +84,8 @@ impl PgHubRepository {
                     version: request.manifest.version.clone(),
                 });
             }
+            tx.commit().await.map_err(db_error)?;
+            return Ok(skill_version_record(row));
         }
 
         sqlx::query(
@@ -188,6 +196,24 @@ impl PgHubRepository {
                 })
                 .collect(),
         })
+    }
+}
+
+fn skill_version_record(row: sqlx::postgres::PgRow) -> SkillVersionRecord {
+    SkillVersionRecord {
+        id: row.get("id"),
+        namespace: row.get("namespace"),
+        name: row.get("name"),
+        version: row.get("version"),
+        description: row.get("description"),
+        digest: row.get("digest"),
+        artifact_url: row.get("artifact_url"),
+        artifact_media_type: row.get("artifact_media_type"),
+        signature_ed25519: row.get("signature_ed25519"),
+        public_key_ed25519: row.get("public_key_ed25519"),
+        yanked_at: row.get("yanked_at"),
+        yank_reason: row.get("yank_reason"),
+        created_at: row.get("created_at"),
     }
 }
 
