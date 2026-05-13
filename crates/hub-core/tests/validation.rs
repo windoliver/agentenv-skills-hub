@@ -1,4 +1,5 @@
 use hub_core::auth::{can_manage_webhooks, can_publish, can_read, can_yank, AuthContext};
+use hub_core::error::HubError;
 use hub_core::model::{NamespaceRole, Visibility};
 use hub_core::validation::{
     validate_artifact_url, validate_digest, validate_namespace, validate_skill_name,
@@ -55,7 +56,11 @@ fn validates_artifact_urls_without_user_info() {
 fn auth_allows_public_reads_without_token() {
     let auth = AuthContext::anonymous();
     assert!(can_read(&auth, Visibility::Public, "community").is_ok());
-    assert!(can_read(&auth, Visibility::Private, "community").is_err());
+    assert!(matches!(
+        can_read(&auth, Visibility::Private, "community"),
+        Err(HubError::PermissionDenied { action, namespace })
+            if action == "read" && namespace == "community"
+    ));
 }
 
 #[test]
@@ -66,7 +71,11 @@ fn auth_requires_scope_and_role_for_mutations() {
         [("community", NamespaceRole::Publisher)],
     );
     assert!(can_publish(&publisher, "community").is_ok());
-    assert!(can_yank(&publisher, "community").is_err());
+    assert!(matches!(
+        can_yank(&publisher, "community"),
+        Err(HubError::PermissionDenied { action, namespace })
+            if action == "yank" && namespace == "community"
+    ));
 
     let admin = AuthContext::new(
         "bob",
@@ -80,4 +89,50 @@ fn auth_requires_scope_and_role_for_mutations() {
     );
     assert!(can_yank(&admin, "community").is_ok());
     assert!(can_manage_webhooks(&admin, "community").is_ok());
+}
+
+#[test]
+fn auth_context_accepts_runtime_loaded_parts() {
+    let scopes = vec!["skills:read".to_owned(), "skills:publish".to_owned()];
+    let roles = vec![("community".to_owned(), NamespaceRole::Publisher)];
+
+    let auth = AuthContext::new("carol", scopes, roles);
+
+    assert!(can_publish(&auth, "community").is_ok());
+}
+
+#[test]
+fn auth_requires_both_scope_and_accepted_role() {
+    let reader_with_publish_scope = AuthContext::new(
+        "dana",
+        ["skills:publish"],
+        [("community", NamespaceRole::Reader)],
+    );
+    assert!(matches!(
+        can_publish(&reader_with_publish_scope, "community"),
+        Err(HubError::PermissionDenied { action, namespace })
+            if action == "publish" && namespace == "community"
+    ));
+
+    let admin_without_webhook_scope = AuthContext::new(
+        "erin",
+        ["skills:read"],
+        [("community", NamespaceRole::Admin)],
+    );
+    assert!(matches!(
+        can_manage_webhooks(&admin_without_webhook_scope, "community"),
+        Err(HubError::PermissionDenied { action, namespace })
+            if action == "manage_webhooks" && namespace == "community"
+    ));
+
+    let publisher_with_webhook_scope = AuthContext::new(
+        "frank",
+        ["webhooks:admin"],
+        [("community", NamespaceRole::Publisher)],
+    );
+    assert!(matches!(
+        can_manage_webhooks(&publisher_with_webhook_scope, "community"),
+        Err(HubError::PermissionDenied { action, namespace })
+            if action == "manage_webhooks" && namespace == "community"
+    ));
 }

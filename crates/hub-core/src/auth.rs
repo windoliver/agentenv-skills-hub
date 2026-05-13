@@ -21,21 +21,20 @@ impl AuthContext {
         }
     }
 
-    pub fn new<const S: usize, const R: usize>(
-        subject: impl Into<String>,
-        scopes: [&str; S],
-        roles: [(&str, NamespaceRole); R],
-    ) -> Self {
+    pub fn new<S, I, N, R>(subject: impl Into<String>, scopes: I, roles: R) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        R: IntoIterator<Item = (N, NamespaceRole)>,
+        N: Into<String>,
+    {
         let mut role_map: BTreeMap<String, BTreeSet<NamespaceRole>> = BTreeMap::new();
         for (namespace, role) in roles {
-            role_map
-                .entry(namespace.to_owned())
-                .or_default()
-                .insert(role);
+            role_map.entry(namespace.into()).or_default().insert(role);
         }
         Self {
             subject: Some(subject.into()),
-            scopes: scopes.into_iter().map(str::to_owned).collect(),
+            scopes: scopes.into_iter().map(Into::into).collect(),
             roles: role_map,
         }
     }
