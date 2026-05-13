@@ -41,34 +41,24 @@ impl PgHubRepository {
         let manifest_json = serde_json::to_value(&request.manifest).expect("manifest serializes");
 
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        let existing_skill_id =
-            sqlx::query("SELECT id FROM skills WHERE namespace = $1 AND name = $2")
-                .bind(namespace)
-                .bind(&request.manifest.name)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_error)?
-                .map(|row| row.get::<Uuid, _>("id"));
-
-        let actual_skill_id = if let Some(id) = existing_skill_id {
-            id
-        } else {
-            sqlx::query(
-                "INSERT INTO skills (id, namespace, name, description, latest_version, visibility, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
-            )
-            .bind(skill_id)
-            .bind(namespace)
-            .bind(&request.manifest.name)
-            .bind(&request.manifest.description)
-            .bind(&request.manifest.version)
-            .bind(visibility_text)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-            skill_id
-        };
+        let actual_skill_id: Uuid = sqlx::query(
+            "INSERT INTO skills (id, namespace, name, description, latest_version, visibility, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+             ON CONFLICT (namespace, name) DO UPDATE
+             SET updated_at = skills.updated_at
+             RETURNING id",
+        )
+        .bind(skill_id)
+        .bind(namespace)
+        .bind(&request.manifest.name)
+        .bind(&request.manifest.description)
+        .bind(&request.manifest.version)
+        .bind(visibility_text)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_error)?
+        .get("id");
 
         let conflict = sqlx::query(SELECT_SKILL_VERSION)
             .bind(actual_skill_id)
