@@ -1,7 +1,10 @@
-use hub_storage::{ArtifactStore, FileArtifactStore};
+use axum::{extract::State, http::header::CONTENT_TYPE, routing::get, Router};
+use bytes::Bytes;
+use hub_storage::{ArtifactStore, FileArtifactStore, OciArtifactStore, S3ArtifactStore};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use tokio::fs;
+use tokio::{fs, net::TcpListener};
 
 fn test_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("hub-storage-{}-{}", std::process::id(), name))
@@ -58,4 +61,70 @@ async fn file_artifact_store_fetch_verified_returns_digest_mismatch_error() {
     assert!(error.to_string().contains("digest mismatch"));
 
     fs::remove_file(path).await.expect("remove test artifact");
+}
+
+#[tokio::test]
+async fn s3_store_fetches_pointer_from_configured_endpoint_and_verifies_digest() {
+    let artifact = Bytes::from_static(b"remote s3 artifact bytes");
+    let base = spawn_artifact_server(artifact.clone()).await;
+    let store = S3ArtifactStore::new_for_endpoint(&base).expect("s3 store");
+
+    let fetched = store
+        .fetch_verified(
+            "s3://agentenv-skills/code-review/1.2.0.tar.zst",
+            &sha256_digest(&artifact),
+        )
+        .await
+        .expect("verified fetch succeeds");
+
+    assert_eq!(fetched, artifact);
+}
+
+#[tokio::test]
+async fn oci_store_fetches_pointer_from_configured_registry_and_verifies_digest() {
+    let artifact = Bytes::from_static(b"remote oci artifact bytes");
+    let base = spawn_artifact_server(artifact.clone()).await;
+    let store = OciArtifactStore::new_for_registry("127.0.0.1", &base).expect("oci store");
+
+    let fetched = store
+        .fetch_verified(
+            "oci://127.0.0.1/acme/skills:1.2.0",
+            &sha256_digest(&artifact),
+        )
+        .await
+        .expect("verified fetch succeeds");
+
+    assert_eq!(fetched, artifact);
+}
+
+async fn spawn_artifact_server(artifact: Bytes) -> String {
+    let app = Router::new()
+        .route("/v2/acme/skills/manifests/1.2.0", get(oci_manifest))
+        .route("/blob", get(artifact_blob))
+        .route(
+            "/agentenv-skills/code-review/1.2.0.tar.zst",
+            get(artifact_blob),
+        )
+        .with_state(artifact);
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind artifact server");
+    let address = listener.local_addr().expect("artifact server address");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("artifact server");
+    });
+
+    format!("http://{address}")
+}
+
+async fn oci_manifest() -> ([(&'static str, &'static str); 1], &'static str) {
+    (
+        [(CONTENT_TYPE.as_str(), "application/json")],
+        r#"{"layers":[{"urls":["/blob"]}]}"#,
+    )
+}
+
+async fn artifact_blob(State(artifact): State<Bytes>) -> Bytes {
+    artifact
 }
