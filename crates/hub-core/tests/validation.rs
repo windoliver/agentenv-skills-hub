@@ -1,3 +1,5 @@
+use hub_core::auth::{can_manage_webhooks, can_publish, can_read, can_yank, AuthContext};
+use hub_core::model::{NamespaceRole, Visibility};
 use hub_core::validation::{
     validate_artifact_url, validate_digest, validate_namespace, validate_skill_name,
     validate_skill_path, validate_version,
@@ -47,4 +49,35 @@ fn validates_artifact_urls_without_user_info() {
 
     assert!(validate_artifact_url("https://example.com/skill.tar.zst").is_err());
     assert!(validate_artifact_url("oci://user:pass@ghcr.io/acme/skills").is_err());
+}
+
+#[test]
+fn auth_allows_public_reads_without_token() {
+    let auth = AuthContext::anonymous();
+    assert!(can_read(&auth, Visibility::Public, "community").is_ok());
+    assert!(can_read(&auth, Visibility::Private, "community").is_err());
+}
+
+#[test]
+fn auth_requires_scope_and_role_for_mutations() {
+    let publisher = AuthContext::new(
+        "alice",
+        ["skills:read", "skills:publish"],
+        [("community", NamespaceRole::Publisher)],
+    );
+    assert!(can_publish(&publisher, "community").is_ok());
+    assert!(can_yank(&publisher, "community").is_err());
+
+    let admin = AuthContext::new(
+        "bob",
+        [
+            "skills:read",
+            "skills:publish",
+            "skills:yank",
+            "webhooks:admin",
+        ],
+        [("community", NamespaceRole::Admin)],
+    );
+    assert!(can_yank(&admin, "community").is_ok());
+    assert!(can_manage_webhooks(&admin, "community").is_ok());
 }
