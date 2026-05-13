@@ -50,7 +50,7 @@ pub fn validate_digest(value: &str) -> HubResult<()> {
 
 pub fn validate_skill_path(value: &str) -> HubResult<PathBuf> {
     let path = Path::new(value);
-    if value.is_empty() || value.contains('\\') {
+    if value.is_empty() || value.contains('\\') || has_windows_drive_prefix(value) {
         return Err(HubError::UnsafeSkillPath {
             path: path.to_path_buf(),
         });
@@ -107,4 +107,9 @@ fn validate_ascii_identifier(value: &str) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }

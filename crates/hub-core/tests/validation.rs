@@ -35,6 +35,7 @@ fn validates_digest_and_bundle_paths() {
     assert!(validate_digest("sha256:not-hex").is_err());
     assert!(validate_skill_path("../secret").is_err());
     assert!(validate_skill_path("/absolute").is_err());
+    assert!(validate_skill_path("C:/secret").is_err());
     assert!(validate_skill_path("").is_err());
 }
 
