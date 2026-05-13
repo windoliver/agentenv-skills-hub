@@ -9,6 +9,14 @@ use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+const SELECT_SKILL_VERSION: &str =
+    "SELECT sv.id, s.namespace, s.name, sv.version, s.description, sv.digest,
+        sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
+        sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
+ FROM skill_versions sv
+ JOIN skills s ON s.id = sv.skill_id
+ WHERE sv.skill_id = $1 AND sv.version = $2";
+
 #[derive(Debug, Clone)]
 pub struct PgHubRepository {
     pool: PgPool,
@@ -62,22 +70,15 @@ impl PgHubRepository {
             skill_id
         };
 
-        let conflict = sqlx::query(
-            "SELECT sv.id, s.namespace, s.name, sv.version, s.description, sv.digest,
-                    sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
-                    sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
-             FROM skill_versions sv
-             JOIN skills s ON s.id = sv.skill_id
-             WHERE sv.skill_id = $1 AND sv.version = $2",
-        )
-        .bind(actual_skill_id)
-        .bind(&request.manifest.version)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_error)?;
+        let conflict = sqlx::query(SELECT_SKILL_VERSION)
+            .bind(actual_skill_id)
+            .bind(&request.manifest.version)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
         if let Some(row) = conflict {
-            let existing: String = row.get("digest");
-            if existing != request.artifact.digest {
+            let record = skill_version_record(row);
+            if record.digest != request.artifact.digest {
                 return Err(HubError::VersionDigestConflict {
                     namespace: namespace.to_owned(),
                     name: request.manifest.name.clone(),
@@ -85,10 +86,10 @@ impl PgHubRepository {
                 });
             }
             tx.commit().await.map_err(db_error)?;
-            return Ok(skill_version_record(row));
+            return Ok(record);
         }
 
-        sqlx::query(
+        let insert_result = sqlx::query(
             "INSERT INTO skill_versions
              (id, skill_id, version, digest, manifest_json, artifact_url, artifact_media_type,
               signature_ed25519, public_key_ed25519, sigstore_bundle_json, published_by, created_at)
@@ -110,6 +111,25 @@ impl PgHubRepository {
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
+
+        if insert_result.rows_affected() == 0 {
+            let row = sqlx::query(SELECT_SKILL_VERSION)
+                .bind(actual_skill_id)
+                .bind(&request.manifest.version)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_error)?;
+            let record = skill_version_record(row);
+            if record.digest != request.artifact.digest {
+                return Err(HubError::VersionDigestConflict {
+                    namespace: namespace.to_owned(),
+                    name: request.manifest.name.clone(),
+                    version: request.manifest.version.clone(),
+                });
+            }
+            tx.commit().await.map_err(db_error)?;
+            return Ok(record);
+        }
 
         sqlx::query("UPDATE skills SET latest_version = $1, updated_at = $2 WHERE id = $3")
             .bind(&request.manifest.version)
