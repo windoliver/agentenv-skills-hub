@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+bytes.workspace = true
 hub-attestation = { path = "../hub-attestation" }
 hub-core = { path = "../hub-core" }
 hub-index = { path = "../hub-index" }

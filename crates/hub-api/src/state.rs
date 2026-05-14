@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use hub_attestation::{verify_ed25519, verify_sigstore_bundle};
 use hub_core::{
     error::{HubError, HubResult},
@@ -8,6 +9,7 @@ use hub_core::{
     service::{HubService, TrustVerifier, VerifiedArtifactStore, WebhookEvent, WebhookQueue},
 };
 use hub_index::{run_migrations, PgHubRepository};
+use hub_search::pgvector::PgVectorSearch;
 use hub_storage::{
     pointer::parse_artifact_pointer, ArtifactStore, FileArtifactStore, OciArtifactStore,
     S3ArtifactStore, StorageError,
@@ -22,6 +24,8 @@ pub struct AppState {
     pub registry: String,
     pub repository: Option<PgHubRepository>,
     pub service: Option<RuntimeHubService>,
+    pub artifact_store: RuntimeArtifactStore,
+    pub search: Option<PgVectorSearch>,
 }
 
 impl AppState {
@@ -30,6 +34,8 @@ impl AppState {
             registry: "community".to_owned(),
             repository: None,
             service: None,
+            artifact_store: RuntimeArtifactStore::default(),
+            search: None,
         }
     }
 
@@ -45,6 +51,8 @@ impl AppState {
 
         let pool = PgPool::connect(&database_url).await?;
         run_migrations(&pool).await?;
+        let search = (std::env::var("HUB_SEARCH_KIND").ok().as_deref() == Some("pgvector"))
+            .then(|| PgVectorSearch::new(pool.clone()));
         Ok(Self::with_repository(
             PgHubRepository::new(pool),
             registry,
@@ -52,6 +60,7 @@ impl AppState {
             RuntimeArtifactStore::from_env()?,
             RuntimeTrustVerifier,
             RuntimeWebhookQueue::default(),
+            search,
         ))
     }
 
@@ -62,10 +71,11 @@ impl AppState {
         artifact_store: RuntimeArtifactStore,
         trust_verifier: RuntimeTrustVerifier,
         webhook_queue: RuntimeWebhookQueue,
+        search: Option<PgVectorSearch>,
     ) -> Self {
         let service = HubService::new(
             repository.clone(),
-            artifact_store,
+            artifact_store.clone(),
             trust_verifier,
             webhook_queue,
         )
@@ -74,6 +84,8 @@ impl AppState {
             registry: registry.into(),
             repository: Some(repository),
             service: Some(service),
+            artifact_store,
+            search,
         }
     }
 }
@@ -107,6 +119,38 @@ impl RuntimeArtifactStore {
             oci,
         })
     }
+
+    pub async fn fetch_verified(&self, artifact: &ArtifactPointer) -> HubResult<Bytes> {
+        let pointer = parse_artifact_pointer(&artifact.url).map_err(hub_storage_error)?;
+        match pointer.scheme() {
+            "file" => self
+                .file
+                .fetch_verified(&artifact.url, &artifact.digest)
+                .await
+                .map_err(hub_storage_error),
+            "s3" => self
+                .s3
+                .as_ref()
+                .ok_or_else(|| HubError::ArtifactVerification {
+                    message: "S3 storage endpoint is not configured".to_owned(),
+                })?
+                .fetch_verified(&artifact.url, &artifact.digest)
+                .await
+                .map_err(hub_storage_error),
+            "oci" => self
+                .oci
+                .as_ref()
+                .ok_or_else(|| HubError::ArtifactVerification {
+                    message: "OCI storage endpoint is not configured".to_owned(),
+                })?
+                .fetch_verified(&artifact.url, &artifact.digest)
+                .await
+                .map_err(hub_storage_error),
+            scheme => Err(HubError::ArtifactVerification {
+                message: format!("unsupported artifact scheme `{scheme}`"),
+            }),
+        }
+    }
 }
 
 impl Default for RuntimeArtifactStore {
@@ -122,38 +166,7 @@ impl Default for RuntimeArtifactStore {
 #[async_trait]
 impl VerifiedArtifactStore for RuntimeArtifactStore {
     async fn verify_artifact(&self, artifact: &ArtifactPointer) -> HubResult<()> {
-        let pointer = parse_artifact_pointer(&artifact.url).map_err(hub_storage_error)?;
-        match pointer.scheme() {
-            "file" => self
-                .file
-                .fetch_verified(&artifact.url, &artifact.digest)
-                .await
-                .map(|_| ())
-                .map_err(hub_storage_error),
-            "s3" => self
-                .s3
-                .as_ref()
-                .ok_or_else(|| HubError::ArtifactVerification {
-                    message: "S3 storage endpoint is not configured".to_owned(),
-                })?
-                .fetch_verified(&artifact.url, &artifact.digest)
-                .await
-                .map(|_| ())
-                .map_err(hub_storage_error),
-            "oci" => self
-                .oci
-                .as_ref()
-                .ok_or_else(|| HubError::ArtifactVerification {
-                    message: "OCI storage endpoint is not configured".to_owned(),
-                })?
-                .fetch_verified(&artifact.url, &artifact.digest)
-                .await
-                .map(|_| ())
-                .map_err(hub_storage_error),
-            scheme => Err(HubError::ArtifactVerification {
-                message: format!("unsupported artifact scheme `{scheme}`"),
-            }),
-        }
+        self.fetch_verified(artifact).await.map(|_| ())
     }
 }
 

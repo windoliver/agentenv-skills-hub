@@ -107,6 +107,7 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
         RuntimeArtifactStore::default(),
         RuntimeTrustVerifier,
         RuntimeWebhookQueue::default(),
+        None,
     );
     let app = build_router_with_state(state);
 
@@ -152,6 +153,25 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
         .find(|hit| hit.name == skill)
         .expect("published skill appears in index");
     assert_eq!(published.digest.as_deref(), Some(digest.as_str()));
+
+    let served_artifact = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/skills/{skill}/1.2.0.tar.zst"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(served_artifact.status(), StatusCode::OK);
+    let served_bytes = to_bytes(served_artifact.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(&served_bytes)),
+        digest
+    );
 
     let yank_response = app
         .clone()

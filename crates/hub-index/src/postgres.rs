@@ -248,6 +248,35 @@ impl PgHubRepository {
 
         Ok(CompatibilityIndex { skills })
     }
+
+    pub async fn public_version_by_name(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> HubResult<SkillVersionRecord> {
+        let row = sqlx::query(
+            "SELECT sv.id, s.namespace, s.name, sv.version, sv.manifest_json ->> 'description' AS description,
+                    sv.digest, sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
+                    sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
+             FROM skill_versions sv
+             JOIN skills s ON s.id = sv.skill_id
+             WHERE s.visibility = 'public' AND sv.yanked_at IS NULL AND s.name = $1 AND sv.version = $2
+             ORDER BY s.namespace ASC
+             LIMIT 1",
+        )
+        .bind(name)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+
+        row.map(skill_version_record)
+            .ok_or_else(|| HubError::SkillVersionNotFound {
+                namespace: "*".to_owned(),
+                name: name.to_owned(),
+                version: version.to_owned(),
+            })
+    }
 }
 
 #[async_trait::async_trait]

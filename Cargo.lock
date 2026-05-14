@@ -749,6 +749,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "hub-attestation",
  "hub-core",
  "hub-index",

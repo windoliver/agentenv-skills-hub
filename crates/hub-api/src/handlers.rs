@@ -7,10 +7,11 @@ use axum::{
 use hub_core::{
     auth::{can_publish, can_yank, AuthContext},
     model::{
-        CompatibilityIndex, CompatibilitySkillHit, NamespaceRole, PublishSkillRequest, Visibility,
+        ArtifactPointer, CompatibilityIndex, CompatibilitySkillHit, NamespaceRole,
+        PublishSkillRequest, Visibility,
     },
 };
-use hub_search::{lexical_rank, SearchDocument};
+use hub_search::{lexical_rank, SearchDocument, SemanticSearch};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -27,7 +28,14 @@ pub struct PublishQuery {
 pub struct SearchQuery {
     q: Option<String>,
     query: Option<String>,
+    namespace: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SimilarSearchRequest {
+    embedding: Vec<f32>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,15 +71,18 @@ pub async fn index_json(
 
 pub async fn list_skills(
     State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    Ok(Json(index_for_state(&state).await?))
+    filtered_search_index(&state, query).await.map(Json)
 }
 
 pub async fn get_skill(
     State(state): State<AppState>,
-    Path((_namespace, name)): Path<(String, String)>,
+    Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    let index = filter_index(index_for_state(&state).await?, |hit| hit.name == name);
+    let index = filter_index(index_for_state(&state).await?, |hit| {
+        hit.registry == namespace && hit.name == name
+    });
     if index.skills.is_empty() {
         return Err(ApiError {
             status: StatusCode::NOT_FOUND,
@@ -83,20 +94,20 @@ pub async fn get_skill(
 
 pub async fn list_versions(
     State(state): State<AppState>,
-    Path((_namespace, name)): Path<(String, String)>,
+    Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    get_skill(State(state), Path((_namespace, name))).await
+    get_skill(State(state), Path((namespace, name))).await
 }
 
 pub async fn get_version(
     State(state): State<AppState>,
-    Path((_namespace, name, version)): Path<(String, String, String)>,
+    Path((namespace, name, version)): Path<(String, String, String)>,
 ) -> Result<Json<CompatibilitySkillHit>, ApiError> {
     index_for_state(&state)
         .await?
         .skills
         .into_iter()
-        .find(|hit| hit.name == name && hit.version == version)
+        .find(|hit| hit.registry == namespace && hit.name == name && hit.version == version)
         .map(Json)
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
@@ -178,11 +189,50 @@ pub async fn search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    let mut index = index_for_state(&state).await?;
+    filtered_search_index(&state, query).await.map(Json)
+}
+
+pub async fn similar_search(
+    State(state): State<AppState>,
+    Json(request): Json<SimilarSearchRequest>,
+) -> Result<Json<CompatibilityIndex>, ApiError> {
+    let search = state
+        .search
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("semantic search is not configured"))?;
+    let limit = request.limit.unwrap_or(20);
+    let docs = search
+        .similar(&request.embedding, limit)
+        .await
+        .map_err(|source| ApiError::internal(source.to_string()))?;
+    Ok(Json(CompatibilityIndex {
+        skills: docs
+            .into_iter()
+            .map(|doc| CompatibilitySkillHit {
+                name: doc.name,
+                version: doc.version,
+                description: doc.description,
+                registry: doc.namespace,
+                digest: None,
+                signature_ed25519: None,
+                public_key_ed25519: None,
+            })
+            .collect(),
+    }))
+}
+
+async fn filtered_search_index(
+    state: &AppState,
+    query: SearchQuery,
+) -> Result<CompatibilityIndex, ApiError> {
+    let mut index = index_for_state(state).await?;
+    if let Some(namespace) = query.namespace {
+        index = filter_index(index, |hit| hit.registry == namespace);
+    }
     let limit = query.limit;
     let Some(search_terms) = query.q.or(query.query) else {
         truncate_index(&mut index, limit);
-        return Ok(Json(index));
+        return Ok(index);
     };
     let docs = index
         .skills
@@ -208,11 +258,7 @@ pub async fn search(
     if let Some(limit) = limit {
         skills.truncate(limit);
     }
-    Ok(Json(CompatibilityIndex { skills }))
-}
-
-pub async fn similar_search() -> (StatusCode, Json<CompatibilityIndex>) {
-    (StatusCode::OK, Json(CompatibilityIndex { skills: vec![] }))
+    Ok(CompatibilityIndex { skills })
 }
 
 pub async fn list_webhooks() -> Json<serde_json::Value> {
@@ -228,8 +274,13 @@ pub async fn delete_webhook(Path(_id): Path<String>) -> StatusCode {
 }
 
 pub async fn fixture_artifact(
-    Path((_name, artifact)): Path<(String, String)>,
+    State(state): State<AppState>,
+    Path((name, artifact)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    if let Some(repository) = &state.repository {
+        return db_artifact_response(&state, repository, &name, &artifact).await;
+    }
+
     if artifact.ends_with(".tar.zst") {
         let bytes = fixture_tarball_bytes()?;
         return Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response());
@@ -239,6 +290,49 @@ pub async fn fixture_artifact(
     }
 
     Ok(StatusCode::NOT_FOUND.into_response())
+}
+
+async fn db_artifact_response(
+    state: &AppState,
+    repository: &hub_index::PgHubRepository,
+    name: &str,
+    artifact: &str,
+) -> Result<Response, ApiError> {
+    let Some((version, signature)) = artifact_version(artifact) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let record = repository.public_version_by_name(name, version).await?;
+    if signature {
+        let Some(signature) = record.signature_ed25519 else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        return Ok(format!("{signature}\n").into_response());
+    }
+
+    let bytes = state
+        .artifact_store
+        .fetch_verified(&ArtifactPointer {
+            url: record.artifact_url,
+            media_type: record.artifact_media_type.clone(),
+            digest: record.digest,
+        })
+        .await?;
+    Ok((
+        [(header::CONTENT_TYPE, record.artifact_media_type)],
+        bytes.to_vec(),
+    )
+        .into_response())
+}
+
+fn artifact_version(artifact: &str) -> Option<(&str, bool)> {
+    artifact
+        .strip_suffix(".tar.zst.sig")
+        .map(|version| (version, true))
+        .or_else(|| {
+            artifact
+                .strip_suffix(".tar.zst")
+                .map(|version| (version, false))
+        })
 }
 
 pub async fn metrics() -> &'static str {
