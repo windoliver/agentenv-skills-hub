@@ -277,6 +277,44 @@ impl PgHubRepository {
                 version: version.to_owned(),
             })
     }
+
+    pub async fn compatibility_index_for_namespace(
+        &self,
+        namespace: &str,
+    ) -> HubResult<CompatibilityIndex> {
+        let rows = sqlx::query(
+            "SELECT s.name, sv.version, sv.manifest_json ->> 'description' AS description,
+                    sv.digest, sv.signature_ed25519, sv.public_key_ed25519
+             FROM skills s
+             JOIN skill_versions sv ON sv.skill_id = s.id
+             WHERE s.namespace = $1 AND s.visibility = 'public' AND sv.yanked_at IS NULL
+             ORDER BY s.name ASC",
+        )
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+
+        let mut skills = rows
+            .into_iter()
+            .map(|row| CompatibilitySkillHit {
+                name: row.get("name"),
+                version: row.get("version"),
+                description: row.get("description"),
+                registry: namespace.to_owned(),
+                digest: Some(row.get("digest")),
+                signature_ed25519: row.get("signature_ed25519"),
+                public_key_ed25519: row.get("public_key_ed25519"),
+            })
+            .collect::<Vec<_>>();
+        skills.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| compare_versions(&left.version, &right.version))
+        });
+
+        Ok(CompatibilityIndex { skills })
+    }
 }
 
 #[async_trait::async_trait]

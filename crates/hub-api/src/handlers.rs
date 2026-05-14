@@ -80,9 +80,10 @@ pub async fn get_skill(
     State(state): State<AppState>,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    let index = filter_index(index_for_state(&state).await?, |hit| {
-        hit.registry == namespace && hit.name == name
-    });
+    let index = filter_index(
+        index_for_state_and_namespace(&state, Some(&namespace)).await?,
+        |hit| hit.name == name,
+    );
     if index.skills.is_empty() {
         return Err(ApiError {
             status: StatusCode::NOT_FOUND,
@@ -103,11 +104,11 @@ pub async fn get_version(
     State(state): State<AppState>,
     Path((namespace, name, version)): Path<(String, String, String)>,
 ) -> Result<Json<CompatibilitySkillHit>, ApiError> {
-    index_for_state(&state)
+    index_for_state_and_namespace(&state, Some(&namespace))
         .await?
         .skills
         .into_iter()
-        .find(|hit| hit.registry == namespace && hit.name == name && hit.version == version)
+        .find(|hit| hit.name == name && hit.version == version)
         .map(Json)
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
@@ -225,10 +226,7 @@ async fn filtered_search_index(
     state: &AppState,
     query: SearchQuery,
 ) -> Result<CompatibilityIndex, ApiError> {
-    let mut index = index_for_state(state).await?;
-    if let Some(namespace) = query.namespace {
-        index = filter_index(index, |hit| hit.registry == namespace);
-    }
+    let mut index = index_for_state_and_namespace(state, query.namespace.as_deref()).await?;
     let limit = query.limit;
     let Some(search_terms) = query.q.or(query.query) else {
         truncate_index(&mut index, limit);
@@ -340,10 +338,26 @@ pub async fn metrics() -> &'static str {
 }
 
 async fn index_for_state(state: &AppState) -> Result<CompatibilityIndex, ApiError> {
+    index_for_state_and_namespace(state, None).await
+}
+
+async fn index_for_state_and_namespace(
+    state: &AppState,
+    namespace: Option<&str>,
+) -> Result<CompatibilityIndex, ApiError> {
     if let Some(repository) = &state.repository {
+        if let Some(namespace) = namespace {
+            return Ok(repository
+                .compatibility_index_for_namespace(namespace)
+                .await?);
+        }
         return Ok(repository.compatibility_index(&state.registry).await?);
     }
-    fixture_index(&state.registry)
+    let index = fixture_index(&state.registry)?;
+    if let Some(namespace) = namespace {
+        return Ok(filter_index(index, |hit| hit.registry == namespace));
+    }
+    Ok(index)
 }
 
 fn fixture_index(registry: &str) -> Result<CompatibilityIndex, ApiError> {

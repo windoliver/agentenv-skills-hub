@@ -34,9 +34,7 @@ services:
       HUB_PUBLIC_BASE_URL: http://127.0.0.1:7777
       HUB_ALLOW_UNSIGNED: "false"
       HUB_SEARCH_KIND: pgvector
-      HUB_STORAGE_KIND: s3
       HUB_STORAGE_S3_ENDPOINT: http://minio:9000
-      HUB_STORAGE_S3_BUCKET: agentenv-skills
     ports:
       - "7777:7777"
 

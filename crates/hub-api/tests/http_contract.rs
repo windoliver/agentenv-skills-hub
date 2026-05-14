@@ -173,6 +173,19 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
         digest
     );
 
+    let namespaced = compatibility_index(
+        app.clone(),
+        &format!("/api/v1/skills?namespace={namespace}&query={skill}"),
+    )
+    .await;
+    assert_eq!(namespaced.skills.len(), 1);
+    assert_eq!(namespaced.skills[0].registry, namespace);
+
+    let path_lookup =
+        compatibility_index(app.clone(), &format!("/api/v1/skills/{namespace}/{skill}")).await;
+    assert_eq!(path_lookup.skills.len(), 1);
+    assert_eq!(path_lookup.skills[0].registry, namespace);
+
     let yank_response = app
         .clone()
         .oneshot(
