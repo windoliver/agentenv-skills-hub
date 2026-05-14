@@ -55,6 +55,7 @@ async fn well_known_agent_skills_returns_discovery_document() {
     let body = json_body(response).await;
     assert_eq!(body["registry"]["index"], "/index.json");
     assert_eq!(body["registry"]["api"], "/api/v1");
+    assert_eq!(body["registry"]["mcp"], "/mcp");
 }
 
 #[tokio::test]

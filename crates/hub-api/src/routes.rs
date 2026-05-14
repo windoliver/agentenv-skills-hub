@@ -3,7 +3,7 @@ use axum::{
     Router,
 };
 
-use crate::{handlers, state::AppState};
+use crate::{handlers, mcp, state::AppState};
 
 pub fn build_router() -> Router {
     build_router_with_state(AppState::fixture())
@@ -15,6 +15,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/.well-known/agent-skills",
             get(handlers::well_known_agent_skills),
         )
+        .route("/mcp", post(mcp::mcp_endpoint))
         .route("/index.json", get(handlers::index_json))
         .route("/skills/{name}/{artifact}", get(handlers::fixture_artifact))
         .route("/api/v1/healthz", get(handlers::healthz))

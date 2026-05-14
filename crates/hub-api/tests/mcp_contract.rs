@@ -1,0 +1,109 @@
+use axum::{
+    body::{to_bytes, Body},
+    http::{header, Request, StatusCode},
+};
+use hub_api::routes::build_router;
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn mcp_initialize_returns_tool_capabilities() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "contract-test", "version": "0.1.0"}
+        }
+    }))
+    .await;
+
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(response["result"]["capabilities"]["tools"], json!({}));
+    assert_eq!(
+        response["result"]["serverInfo"],
+        json!({"name": "agentenv-skills-hub", "version": env!("CARGO_PKG_VERSION")})
+    );
+}
+
+#[tokio::test]
+async fn mcp_tools_list_exposes_only_read_only_skill_tools() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "tools",
+        "method": "tools/list",
+        "params": {}
+    }))
+    .await;
+
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let names = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "skills.search",
+            "skills.find_similar",
+            "skills.get_manifest",
+            "skills.suggest_for_task"
+        ]
+    );
+    assert!(tools
+        .iter()
+        .all(|tool| tool["inputSchema"]["type"] == "object"));
+}
+
+#[tokio::test]
+async fn mcp_skills_search_returns_fixture_skill_summaries() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "skills.search",
+            "arguments": {"query": "review", "limit": 5}
+        }
+    }))
+    .await;
+
+    let result = response["result"].clone();
+    assert_eq!(result["isError"], false);
+    let payload = tool_json_payload(&result);
+    assert_eq!(payload["warnings"], json!([]));
+    assert_eq!(payload["skills"][0]["name"], "code-review");
+    assert_eq!(payload["skills"][0]["version"], "1.2.0");
+    assert_eq!(payload["skills"][0]["registry"], "community");
+}
+
+async fn mcp_request(payload: Value) -> Value {
+    let app = build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+fn tool_json_payload(result: &Value) -> Value {
+    let text = result["content"][0]["text"].as_str().unwrap();
+    serde_json::from_str(text).unwrap()
+}
+
+async fn json_body(response: axum::response::Response) -> Value {
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
