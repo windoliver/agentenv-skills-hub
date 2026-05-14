@@ -128,10 +128,13 @@ async fn publish_validates_artifact_and_trust_inserts_version_and_enqueues_webho
     assert_eq!(record.version, "1.2.3");
 
     let artifact_calls = artifacts.verified.lock().unwrap();
-    assert_eq!(artifact_calls.as_slice(), &[request.artifact.clone()]);
+    assert_eq!(
+        artifact_calls.as_slice(),
+        std::slice::from_ref(&request.artifact)
+    );
 
     let trust_calls = trust.verified.lock().unwrap();
-    assert_eq!(trust_calls.as_slice(), &[request.clone()]);
+    assert_eq!(trust_calls.as_slice(), std::slice::from_ref(&request));
 
     let insert_calls = repo.insert_calls.lock().unwrap();
     assert_eq!(insert_calls.len(), 1);

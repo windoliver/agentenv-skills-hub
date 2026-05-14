@@ -30,7 +30,7 @@ async fn file_artifact_store_fetch_verified_reads_file_artifact_and_verifies_dig
         .expect("write test artifact");
 
     let url = url::Url::from_file_path(&path).expect("file url");
-    let store = FileArtifactStore::default();
+    let store = FileArtifactStore;
 
     let fetched = store
         .fetch_verified(url.as_str(), &sha256_digest(artifact))
@@ -51,7 +51,7 @@ async fn file_artifact_store_fetch_verified_returns_digest_mismatch_error() {
         .expect("write test artifact");
 
     let url = url::Url::from_file_path(&path).expect("file url");
-    let store = FileArtifactStore::default();
+    let store = FileArtifactStore;
 
     let error = store
         .fetch_verified(url.as_str(), &sha256_digest(b"different bytes"))
