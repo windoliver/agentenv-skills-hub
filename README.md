@@ -7,3 +7,23 @@ The hub is a separate service from `agentenv` core. Existing `agentenv` clients 
 - `GET /index.json`
 - `GET /skills/{name}/{version}.tar.zst`
 - `GET /skills/{name}/{version}.tar.zst.sig`
+
+## Quickstart
+
+```bash
+docker compose up --build
+curl http://127.0.0.1:7777/.well-known/agent-skills
+curl http://127.0.0.1:7777/index.json
+```
+
+## Compatibility
+
+Existing `agentenv` clients can use this hub as an HTTP registry:
+
+```yaml
+skills:
+  registries:
+    - name: community
+      type: http
+      url: http://127.0.0.1:7777
+```
