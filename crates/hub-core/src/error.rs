@@ -22,6 +22,8 @@ pub enum HubError {
     InvalidArtifactUrl { value: String, message: String },
     #[error("permission denied for `{action}` on namespace `{namespace}`")]
     PermissionDenied { action: String, namespace: String },
+    #[error("unsigned skill artifacts are not allowed")]
+    UnsignedArtifactRejected,
     #[error("skill `{namespace}/{name}` version `{version}` already exists with another digest")]
     VersionDigestConflict {
         namespace: String,
