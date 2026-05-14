@@ -747,6 +747,7 @@ name = "hub-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "hub-attestation",
  "hub-core",
@@ -756,6 +757,7 @@ dependencies = [
  "hub-webhooks",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tar",
  "tempfile",

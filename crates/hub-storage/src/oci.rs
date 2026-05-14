@@ -106,14 +106,11 @@ impl ArtifactStore for OciArtifactStore {
                 source,
             })?;
 
-        let layer_url = first_layer_url(pointer, manifest)?;
-        let layer_url =
-            base_url
-                .join(&layer_url)
-                .map_err(|source| StorageError::InvalidPointer {
-                    value: pointer.to_owned(),
-                    message: format!("invalid OCI layer URL: {source}"),
-                })?;
+        let layer_digest = first_layer_digest(pointer, manifest, expected_digest)?;
+        let layer_url = endpoint_url(
+            base_url,
+            &format!("v2/{}/blobs/{}", image.repo, layer_digest),
+        );
         let bytes = self
             .client
             .get(layer_url)
@@ -178,15 +175,27 @@ fn oci_image<'a>(pointer: &str, url: &'a Url) -> StorageResult<OciImage<'a>> {
     Ok(OciImage { repo, tag })
 }
 
-fn first_layer_url(pointer: &str, manifest: OciManifest) -> StorageResult<String> {
-    manifest
+fn first_layer_digest(
+    pointer: &str,
+    manifest: OciManifest,
+    expected_digest: &str,
+) -> StorageResult<String> {
+    let digest = manifest
         .layers
         .into_iter()
-        .find_map(|layer| layer.urls.into_iter().next())
+        .map(|layer| layer.digest)
+        .find(|digest| digest == expected_digest)
         .ok_or_else(|| StorageError::InvalidPointer {
             value: pointer.to_owned(),
-            message: "OCI manifest does not include a layer URL".to_owned(),
-        })
+            message: "OCI manifest does not include the expected layer digest".to_owned(),
+        })?;
+    if digest.contains('/') || digest.contains('?') || digest.contains('#') {
+        return Err(StorageError::InvalidPointer {
+            value: pointer.to_owned(),
+            message: "OCI layer digest contains invalid URL characters".to_owned(),
+        });
+    }
+    Ok(digest)
 }
 
 struct OciImage<'a> {
@@ -201,5 +210,5 @@ struct OciManifest {
 
 #[derive(Debug, Deserialize)]
 struct OciLayer {
-    urls: Vec<String>,
+    digest: String,
 }

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 hub-attestation = { path = "../hub-attestation" }
 hub-core = { path = "../hub-core" }
@@ -16,6 +17,7 @@ hub-storage = { path = "../hub-storage" }
 hub-webhooks = { path = "../hub-webhooks" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tar.workspace = true
 tokio.workspace = true

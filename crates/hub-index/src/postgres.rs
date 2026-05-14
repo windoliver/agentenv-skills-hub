@@ -4,6 +4,7 @@ use hub_core::{
         CompatibilityIndex, CompatibilitySkillHit, PublishSkillRequest, SkillVersionRecord,
         Visibility,
     },
+    service::HubRepository,
 };
 use semver::Version;
 use sqlx::{PgPool, Row};
@@ -40,7 +41,10 @@ impl PgHubRepository {
         let skill_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
         let visibility_text = visibility_text(visibility);
-        let manifest_json = serde_json::to_value(&request.manifest).expect("manifest serializes");
+        let manifest_json =
+            serde_json::to_value(&request.manifest).map_err(|source| HubError::Database {
+                message: format!("failed to serialize manifest: {source}"),
+            })?;
 
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         let actual_skill_id: Uuid = sqlx::query(
@@ -243,6 +247,29 @@ impl PgHubRepository {
         });
 
         Ok(CompatibilityIndex { skills })
+    }
+}
+
+#[async_trait::async_trait]
+impl HubRepository for PgHubRepository {
+    async fn insert_version(
+        &self,
+        namespace: &str,
+        visibility: Visibility,
+        published_by: &str,
+        request: &PublishSkillRequest,
+    ) -> HubResult<SkillVersionRecord> {
+        PgHubRepository::insert_version(self, namespace, visibility, published_by, request).await
+    }
+
+    async fn yank_version(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+        reason: &str,
+    ) -> HubResult<()> {
+        PgHubRepository::yank_version(self, namespace, name, version, reason).await
     }
 }
 

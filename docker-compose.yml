@@ -39,10 +39,8 @@ services:
     ports:
       - "7777:7777"
 
-profiles:
   qdrant:
-    services:
-      qdrant:
-        image: qdrant/qdrant:latest
-        ports:
-          - "6333:6333"
+    profiles: ["qdrant"]
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"

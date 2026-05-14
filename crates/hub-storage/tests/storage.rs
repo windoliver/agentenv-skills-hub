@@ -98,9 +98,12 @@ async fn oci_store_fetches_pointer_from_configured_registry_and_verifies_digest(
 }
 
 async fn spawn_artifact_server(artifact: Bytes) -> String {
+    let digest = sha256_digest(&artifact);
+    let manifest_path = "/v2/acme/skills/manifests/1.2.0";
+    let blob_path = format!("/v2/acme/skills/blobs/{digest}");
     let app = Router::new()
-        .route("/v2/acme/skills/manifests/1.2.0", get(oci_manifest))
-        .route("/blob", get(artifact_blob))
+        .route(manifest_path, get(oci_manifest))
+        .route(&blob_path, get(artifact_blob))
         .route(
             "/agentenv-skills/code-review/1.2.0.tar.zst",
             get(artifact_blob),
@@ -118,10 +121,15 @@ async fn spawn_artifact_server(artifact: Bytes) -> String {
     format!("http://{address}")
 }
 
-async fn oci_manifest() -> ([(&'static str, &'static str); 1], &'static str) {
+async fn oci_manifest(
+    State(artifact): State<Bytes>,
+) -> ([(&'static str, &'static str); 1], String) {
     (
         [(CONTENT_TYPE.as_str(), "application/json")],
-        r#"{"layers":[{"urls":["/blob"]}]}"#,
+        format!(
+            r#"{{"layers":[{{"digest":"{}"}}]}}"#,
+            sha256_digest(&artifact)
+        ),
     )
 }
 
