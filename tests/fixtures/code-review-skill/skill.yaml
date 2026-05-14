@@ -1,0 +1,9 @@
+name: code-review
+version: 1.2.0
+description: Review code changes
+entry: SKILL.md
+files:
+  - SKILL.md
+signatures:
+  ed25519: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  public_key_ed25519: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
