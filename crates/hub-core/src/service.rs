@@ -215,6 +215,9 @@ fn validate_publish_request(namespace: &str, request: &PublishSkillRequest) -> H
     validate_skill_name(&request.manifest.name)?;
     validate_version(&request.manifest.version)?;
     validate_digest(&request.artifact.digest)?;
+    if let Some(bundle_digest) = request.bundle_digest.as_deref() {
+        validate_digest(bundle_digest)?;
+    }
     validate_artifact_url(&request.artifact.url)?;
     validate_skill_path(&request.manifest.entry)?;
     for file in &request.manifest.files {

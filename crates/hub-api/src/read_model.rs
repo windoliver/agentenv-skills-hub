@@ -79,9 +79,9 @@ pub(crate) fn fixture_index(registry: &str) -> Result<CompatibilityIndex, ApiErr
             version: "1.2.0".to_owned(),
             description: Some("Review code changes".to_owned()),
             registry: registry.to_owned(),
-            digest: Some(sha256_digest(&fixture_tarball_bytes()?)),
-            signature_ed25519: Some(fixture_signature().trim().to_owned()),
-            public_key_ed25519: Some("bb".repeat(32)),
+            digest: Some(fixture_bundle_digest()),
+            signature_ed25519: None,
+            public_key_ed25519: None,
         }],
     })
 }
@@ -181,6 +181,15 @@ fn append_bytes<W: Write>(
         .map_err(|source| ApiError::internal(format!("failed to append fixture file: {source}")))
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+fn fixture_bundle_digest() -> String {
+    let content = include_bytes!("../../../tests/fixtures/code-review-skill/SKILL.md");
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentenv-skill-v1\n");
+    hasher.update(b"SKILL.md");
+    hasher.update([0]);
+    hasher.update(content.len().to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(content);
+    hasher.update(b"\n");
+    format!("sha256:{:x}", hasher.finalize())
 }

@@ -38,6 +38,8 @@ pub struct ArtifactPointer {
 pub struct PublishSkillRequest {
     pub manifest: SkillManifest,
     pub artifact: ArtifactPointer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_digest: Option<String>,
     pub signature_ed25519: Option<String>,
     pub public_key_ed25519: Option<String>,
     pub sigstore_bundle: Option<serde_json::Value>,
@@ -53,6 +55,7 @@ pub struct SkillVersionRecord {
     pub digest: String,
     pub artifact_url: String,
     pub artifact_media_type: String,
+    pub artifact_digest: String,
     pub signature_ed25519: Option<String>,
     pub public_key_ed25519: Option<String>,
     pub yanked_at: Option<OffsetDateTime>,

@@ -40,6 +40,11 @@
 - `GET /api/v1/readyz`
 - `GET /metrics`
 
+Publish requests verify `artifact.digest` against the stored artifact bytes.
+For agentenv compatibility, the hub stores the unpacked skill bundle digest
+separately and exposes that value through `/index.json`; clients may also
+supply `bundle_digest` explicitly.
+
 ## MCP
 
 - `POST /mcp`

@@ -1,3 +1,9 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Cursor, Read},
+    path::Path as FsPath,
+};
+
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -8,12 +14,14 @@ use hub_core::{
     auth::{can_publish, can_yank, AuthContext},
     model::{
         ArtifactPointer, CompatibilityIndex, CompatibilitySkillHit, NamespaceRole,
-        PublishSkillRequest, Visibility,
+        PublishSkillRequest, SkillManifest, Visibility,
     },
+    validation::validate_skill_path,
 };
 use hub_search::SemanticSearch;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     error::ApiError,
@@ -150,6 +158,21 @@ pub async fn publish_version(
         .service
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("hub repository is not configured"))?;
+    let artifact_bytes = state
+        .artifact_store
+        .fetch_verified(&request.artifact)
+        .await?;
+    let derived_bundle_digest =
+        bundle_digest_from_tar_zst(artifact_bytes.as_ref(), &request.manifest)?;
+    if let Some(provided_bundle_digest) = request.bundle_digest.as_deref() {
+        if provided_bundle_digest != derived_bundle_digest {
+            return Err(ApiError::bad_request(format!(
+                "bundle digest mismatch: expected `{provided_bundle_digest}`, found `{derived_bundle_digest}`"
+            )));
+        }
+    }
+    let mut request = request;
+    request.bundle_digest = Some(derived_bundle_digest);
     let record = service
         .publish(
             &auth,
@@ -299,7 +322,7 @@ async fn db_artifact_response(
         .fetch_verified(&ArtifactPointer {
             url: record.artifact_url,
             media_type: record.artifact_media_type.clone(),
-            digest: record.digest,
+            digest: record.artifact_digest,
         })
         .await?;
     Ok((
@@ -318,6 +341,96 @@ fn artifact_version(artifact: &str) -> Option<(&str, bool)> {
                 .strip_suffix(".tar.zst")
                 .map(|version| (version, false))
         })
+}
+
+fn bundle_digest_from_tar_zst(bytes: &[u8], manifest: &SkillManifest) -> Result<String, ApiError> {
+    let tar_bytes = zstd::stream::decode_all(Cursor::new(bytes)).map_err(|source| {
+        ApiError::bad_request(format!(
+            "skill artifact is not a valid zstd tarball: {source}"
+        ))
+    })?;
+    let wanted_paths = manifest
+        .files
+        .iter()
+        .map(|path| canonical_skill_path(path))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut file_bytes = BTreeMap::new();
+    let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
+    for entry in archive.entries().map_err(|source| {
+        ApiError::bad_request(format!(
+            "failed to read skill artifact tar entries: {source}"
+        ))
+    })? {
+        let mut entry = entry.map_err(|source| {
+            ApiError::bad_request(format!("failed to read skill artifact tar entry: {source}"))
+        })?;
+        let entry_path = entry.path().map_err(|source| {
+            ApiError::bad_request(format!("failed to read skill artifact tar path: {source}"))
+        })?;
+        let entry_path = canonical_archive_path(&entry_path)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(ApiError::bad_request(format!(
+                "skill artifact contains unsupported tar entry `{entry_path}`"
+            )));
+        }
+        if wanted_paths.contains(&entry_path) {
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).map_err(|source| {
+                ApiError::bad_request(format!(
+                    "failed to read skill artifact file `{entry_path}`: {source}"
+                ))
+            })?;
+            file_bytes.insert(entry_path, content);
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentenv-skill-v1\n");
+    for path in wanted_paths {
+        let content = file_bytes.get(&path).ok_or_else(|| {
+            ApiError::bad_request(format!("skill artifact is missing declared file `{path}`"))
+        })?;
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(content.len().to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(content);
+        hasher.update(b"\n");
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn canonical_archive_path(path: &FsPath) -> Result<String, ApiError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| ApiError::bad_request("skill artifact contains a non-UTF-8 tar path"))?;
+    canonical_skill_path(path)
+}
+
+fn canonical_skill_path(path: &str) -> Result<String, ApiError> {
+    let path = validate_skill_path(path)?;
+    canonical_path_string(&path)
+}
+
+fn canonical_path_string(path: &FsPath) -> Result<String, ApiError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(ApiError::bad_request(format!(
+                "unsafe skill path `{}`",
+                path.display()
+            )));
+        };
+        let part = part.to_str().ok_or_else(|| {
+            ApiError::bad_request(format!("skill path `{}` is not UTF-8", path.display()))
+        })?;
+        parts.push(part);
+    }
+    Ok(parts.join("/"))
 }
 
 pub async fn metrics() -> &'static str {
