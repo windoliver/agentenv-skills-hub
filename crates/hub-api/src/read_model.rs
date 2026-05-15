@@ -100,7 +100,27 @@ pub(crate) fn truncate_index(index: &mut CompatibilityIndex, limit: Option<usize
     }
 }
 
-#[allow(dead_code)]
+pub(crate) async fn manifest_for_state(
+    state: &AppState,
+    name: &str,
+    version: Option<&str>,
+) -> Result<SkillManifest, ApiError> {
+    if let Some(repository) = &state.repository {
+        return Ok(repository.public_manifest_by_name(name, version).await?);
+    }
+
+    let manifest = fixture_manifest();
+    let version_matches = match version {
+        Some(version) => version == manifest.version,
+        None => true,
+    };
+    if name == manifest.name && version_matches {
+        return Ok(manifest);
+    }
+
+    Err(ApiError::bad_request("skill manifest was not found"))
+}
+
 pub(crate) fn fixture_manifest() -> SkillManifest {
     SkillManifest {
         name: "code-review".to_owned(),

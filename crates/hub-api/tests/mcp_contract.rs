@@ -81,6 +81,73 @@ async fn mcp_skills_search_returns_fixture_skill_summaries() {
     assert_eq!(payload["skills"][0]["registry"], "community");
 }
 
+#[tokio::test]
+async fn mcp_get_manifest_returns_exact_fixture_manifest() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "manifest-exact",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.get_manifest",
+            "arguments": {"name": "code-review", "version": "1.2.0"}
+        }
+    }))
+    .await;
+
+    let result = response["result"].clone();
+    assert_eq!(result["isError"], false);
+    let payload = tool_json_payload(&result);
+    let manifest = &payload["manifest"];
+    assert_eq!(manifest["name"], "code-review");
+    assert_eq!(manifest["version"], "1.2.0");
+    assert_eq!(manifest["entry"], "SKILL.md");
+    assert_eq!(manifest["files"], json!(["SKILL.md"]));
+}
+
+#[tokio::test]
+async fn mcp_get_manifest_omitted_version_uses_latest_visible_fixture_version() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "manifest-latest",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.get_manifest",
+            "arguments": {"name": "code-review"}
+        }
+    }))
+    .await;
+
+    let result = response["result"].clone();
+    assert_eq!(result["isError"], false);
+    let payload = tool_json_payload(&result);
+    let manifest = &payload["manifest"];
+    assert_eq!(manifest["name"], "code-review");
+    assert_eq!(manifest["version"], "1.2.0");
+    assert_eq!(manifest["entry"], "SKILL.md");
+    assert_eq!(manifest["files"], json!(["SKILL.md"]));
+}
+
+#[tokio::test]
+async fn mcp_get_manifest_unknown_fixture_skill_returns_tool_error() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "manifest-missing",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.get_manifest",
+            "arguments": {"name": "missing-skill", "version": "1.2.0"}
+        }
+    }))
+    .await;
+
+    let result = response["result"].clone();
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        tool_json_payload(&result),
+        json!({"error": "skill manifest was not found"})
+    );
+}
+
 async fn mcp_request(payload: Value) -> Value {
     let app = build_router();
     let response = app

@@ -1,9 +1,10 @@
 use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse, Json};
+use hub_core::validation::{validate_skill_name, validate_version};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    read_model::{filtered_search_index, SearchParams},
+    read_model::{filtered_search_index, manifest_for_state, SearchParams},
     state::AppState,
 };
 
@@ -56,6 +57,12 @@ struct SearchArgs {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GetManifestArgs {
+    name: String,
+    version: Option<String>,
+}
+
 pub async fn mcp_endpoint(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
     let request = match serde_json::from_slice::<JsonRpcRequest>(&body) {
         Ok(request) => request,
@@ -99,9 +106,7 @@ async fn tools_call(state: &AppState, params: Value) -> Result<Value, McpError> 
         "skills.find_similar" => Ok(tool_error_json(json!({
             "error": "semantic search is not configured"
         }))),
-        "skills.get_manifest" => Ok(tool_error_json(json!({
-            "error": "skill manifest was not found"
-        }))),
+        "skills.get_manifest" => skills_get_manifest(state, params.arguments).await,
         "skills.suggest_for_task" => Ok(tool_error_json(json!({
             "error": "semantic search is not configured"
         }))),
@@ -124,6 +129,33 @@ async fn skills_search(state: &AppState, arguments: Value) -> Result<Value, McpE
     .await
     .map_err(|_| McpError::new(INTERNAL_ERROR, "skill search failed"))?;
     Ok(tool_json(json!({"skills": index.skills, "warnings": []})))
+}
+
+async fn skills_get_manifest(state: &AppState, arguments: Value) -> Result<Value, McpError> {
+    let args = parse_params::<GetManifestArgs>(arguments)?;
+    let name = non_empty(args.name, "name")?;
+    validate_skill_name(&name).map_err(|_| McpError::new(INVALID_PARAMS, "invalid skill name"))?;
+
+    let version = match args.version {
+        Some(version) => {
+            let version = non_empty(version, "version")?;
+            validate_version(&version)
+                .map_err(|_| McpError::new(INVALID_PARAMS, "invalid version"))?;
+            Some(version)
+        }
+        None => None,
+    };
+
+    let manifest = match manifest_for_state(state, &name, version.as_deref()).await {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            return Ok(tool_error_json(json!({
+                "error": "skill manifest was not found"
+            })));
+        }
+    };
+
+    Ok(tool_json(json!({"manifest": manifest})))
 }
 
 fn initialize_result() -> Value {

@@ -1,8 +1,8 @@
 use hub_core::{
     error::{HubError, HubResult},
     model::{
-        CompatibilityIndex, CompatibilitySkillHit, PublishSkillRequest, SkillVersionRecord,
-        Visibility,
+        CompatibilityIndex, CompatibilitySkillHit, PublishSkillRequest, SkillManifest,
+        SkillVersionRecord, Visibility,
     },
     service::HubRepository,
 };
@@ -276,6 +276,67 @@ impl PgHubRepository {
                 name: name.to_owned(),
                 version: version.to_owned(),
             })
+    }
+
+    pub async fn public_manifest_by_name(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> HubResult<SkillManifest> {
+        let rows = if let Some(version) = version {
+            sqlx::query(
+                "SELECT sv.version, sv.manifest_json
+                 FROM skill_versions sv
+                 JOIN skills s ON s.id = sv.skill_id
+                 WHERE s.visibility = 'public'
+                   AND sv.yanked_at IS NULL
+                   AND s.name = $1
+                   AND sv.version = $2
+                 ORDER BY s.namespace ASC
+                 LIMIT 1",
+            )
+            .bind(name)
+            .bind(version)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_error)?
+        } else {
+            sqlx::query(
+                "SELECT sv.version, sv.manifest_json
+                 FROM skill_versions sv
+                 JOIN skills s ON s.id = sv.skill_id
+                 WHERE s.visibility = 'public'
+                   AND sv.yanked_at IS NULL
+                   AND s.name = $1
+                 ORDER BY s.namespace ASC",
+            )
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_error)?
+        };
+
+        let row = rows
+            .into_iter()
+            .reduce(|selected, candidate| {
+                let selected_version: String = selected.get("version");
+                let candidate_version: String = candidate.get("version");
+                if compare_versions(&selected_version, &candidate_version).is_lt() {
+                    candidate
+                } else {
+                    selected
+                }
+            })
+            .ok_or_else(|| HubError::SkillVersionNotFound {
+                namespace: "*".to_owned(),
+                name: name.to_owned(),
+                version: version.unwrap_or("*").to_owned(),
+            })?;
+
+        let manifest_json: serde_json::Value = row.get("manifest_json");
+        serde_json::from_value(manifest_json).map_err(|source| HubError::Database {
+            message: format!("failed to deserialize manifest: {source}"),
+        })
     }
 
     pub async fn compatibility_index_for_namespace(
