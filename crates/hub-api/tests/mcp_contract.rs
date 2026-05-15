@@ -238,6 +238,108 @@ async fn mcp_suggest_for_task_falls_back_to_lexical_search_with_warning() {
     );
 }
 
+#[tokio::test]
+async fn mcp_unknown_method_returns_method_not_found() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "unknown-method",
+        "method": "missing/method",
+        "params": {}
+    }))
+    .await;
+
+    assert_eq!(response["error"]["code"], -32601);
+}
+
+#[tokio::test]
+async fn mcp_unknown_tool_returns_invalid_params() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "unknown-tool",
+        "method": "tools/call",
+        "params": {"name": "skills.publish", "arguments": {}}
+    }))
+    .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(response["error"]["message"], "unknown tool");
+}
+
+#[tokio::test]
+async fn mcp_rejects_empty_search_query() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "empty-search",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.search",
+            "arguments": {"query": "   "}
+        }
+    }))
+    .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(response["error"]["message"], "`query` must not be empty");
+}
+
+#[tokio::test]
+async fn mcp_rejects_zero_limit() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "zero-limit",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.search",
+            "arguments": {"query": "review", "limit": 0}
+        }
+    }))
+    .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(
+        response["error"]["message"],
+        "`limit` must be greater than zero"
+    );
+}
+
+#[tokio::test]
+async fn mcp_clamps_large_search_limit() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "large-limit",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.search",
+            "arguments": {"query": "review", "limit": 500}
+        }
+    }))
+    .await;
+
+    let payload = tool_json_payload(&response["result"]);
+    assert_eq!(payload["skills"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn mcp_malformed_json_returns_parse_error() {
+    let app = build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["id"], Value::Null);
+    assert_eq!(body["error"]["code"], -32700);
+}
+
 async fn mcp_request(payload: Value) -> Value {
     mcp_request_with_app(build_router(), payload).await
 }
