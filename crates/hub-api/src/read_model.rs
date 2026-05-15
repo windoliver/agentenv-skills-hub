@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use hub_core::model::{CompatibilityIndex, CompatibilitySkillHit, SkillManifest};
 use hub_search::{lexical_rank, SearchDocument};
 use sha2::{Digest, Sha256};
@@ -118,7 +119,10 @@ pub(crate) async fn manifest_for_state(
         return Ok(manifest);
     }
 
-    Err(ApiError::bad_request("skill manifest was not found"))
+    Err(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "skill manifest was not found".to_owned(),
+    })
 }
 
 pub(crate) fn fixture_manifest() -> SkillManifest {

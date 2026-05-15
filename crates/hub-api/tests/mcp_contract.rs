@@ -2,8 +2,14 @@ use axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
 };
-use hub_api::routes::build_router;
+use hub_api::{
+    routes::{build_router, build_router_with_state},
+    state::{AppState, RuntimeArtifactStore, RuntimeTrustVerifier, RuntimeWebhookQueue},
+};
+use hub_index::PgHubRepository;
 use serde_json::{json, Value};
+use sqlx::postgres::PgPoolOptions;
+use std::time::Duration;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -148,8 +154,49 @@ async fn mcp_get_manifest_unknown_fixture_skill_returns_tool_error() {
     );
 }
 
+#[tokio::test]
+async fn mcp_get_manifest_internal_lookup_failure_returns_json_rpc_error() {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy("postgres://agentenv:agentenv@127.0.0.1:1/agentenv")
+        .unwrap();
+    let state = AppState::with_repository(
+        PgHubRepository::new(pool),
+        "community",
+        true,
+        RuntimeArtifactStore::default(),
+        RuntimeTrustVerifier,
+        RuntimeWebhookQueue::default(),
+        None,
+    );
+
+    let response = mcp_request_with_app(
+        build_router_with_state(state),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "manifest-db-error",
+            "method": "tools/call",
+            "params": {
+                "name": "skills.get_manifest",
+                "arguments": {"name": "code-review", "version": "1.2.0"}
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], "manifest-db-error");
+    assert_eq!(response["error"]["code"], -32603);
+    assert_eq!(response["error"]["message"], "skill manifest lookup failed");
+    assert!(response.get("result").is_none());
+}
+
 async fn mcp_request(payload: Value) -> Value {
-    let app = build_router();
+    mcp_request_with_app(build_router(), payload).await
+}
+
+async fn mcp_request_with_app(app: axum::Router, payload: Value) -> Value {
     let response = app
         .oneshot(
             Request::builder()

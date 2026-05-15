@@ -146,16 +146,16 @@ async fn skills_get_manifest(state: &AppState, arguments: Value) -> Result<Value
         None => None,
     };
 
-    let manifest = match manifest_for_state(state, &name, version.as_deref()).await {
-        Ok(manifest) => manifest,
-        Err(_) => {
-            return Ok(tool_error_json(json!({
-                "error": "skill manifest was not found"
-            })));
-        }
-    };
-
-    Ok(tool_json(json!({"manifest": manifest})))
+    match manifest_for_state(state, &name, version.as_deref()).await {
+        Ok(manifest) => Ok(tool_json(json!({"manifest": manifest}))),
+        Err(error) if error.status == StatusCode::NOT_FOUND => Ok(tool_error_json(json!({
+            "error": "skill manifest was not found"
+        }))),
+        Err(_) => Err(McpError::new(
+            INTERNAL_ERROR,
+            "skill manifest lookup failed",
+        )),
+    }
 }
 
 fn initialize_result() -> Value {
