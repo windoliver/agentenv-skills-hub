@@ -7,6 +7,7 @@ use hub_api::{
     state::{AppState, RuntimeArtifactStore, RuntimeTrustVerifier, RuntimeWebhookQueue},
 };
 use hub_index::PgHubRepository;
+use hub_search::pgvector::PgVectorSearch;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -239,6 +240,74 @@ async fn mcp_suggest_for_task_falls_back_to_lexical_search_with_warning() {
 }
 
 #[tokio::test]
+async fn mcp_find_similar_uses_configured_semantic_search() {
+    let pool = unavailable_pool();
+    let state = AppState::with_repository(
+        PgHubRepository::new(pool.clone()),
+        "community",
+        true,
+        RuntimeArtifactStore::default(),
+        RuntimeTrustVerifier,
+        RuntimeWebhookQueue::default(),
+        Some(PgVectorSearch::new(pool)),
+    );
+
+    let response = mcp_request_with_app(
+        build_router_with_state(state),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "configured-similar",
+            "method": "tools/call",
+            "params": {
+                "name": "skills.find_similar",
+                "arguments": {
+                    "description": "Review code changes and produce actionable comments",
+                    "limit": 5
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["error"]["code"], -32603);
+    assert_eq!(response["error"]["message"], "semantic skill search failed");
+}
+
+#[tokio::test]
+async fn mcp_suggest_for_task_uses_configured_semantic_search_before_fallback() {
+    let pool = unavailable_pool();
+    let state = AppState::with_repository(
+        PgHubRepository::new(pool.clone()),
+        "community",
+        true,
+        RuntimeArtifactStore::default(),
+        RuntimeTrustVerifier,
+        RuntimeWebhookQueue::default(),
+        Some(PgVectorSearch::new(pool)),
+    );
+
+    let response = mcp_request_with_app(
+        build_router_with_state(state),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "configured-suggest",
+            "method": "tools/call",
+            "params": {
+                "name": "skills.suggest_for_task",
+                "arguments": {
+                    "task_description": "review code changes",
+                    "limit": 5
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["error"]["code"], -32603);
+    assert_eq!(response["error"]["message"], "skill suggestion failed");
+}
+
+#[tokio::test]
 async fn mcp_unknown_method_returns_method_not_found() {
     let response = mcp_request(json!({
         "jsonrpc": "2.0",
@@ -341,24 +410,91 @@ async fn mcp_malformed_json_returns_parse_error() {
     assert_eq!(body["error"]["code"], -32700);
 }
 
+#[tokio::test]
+async fn mcp_initialized_notification_is_accepted_without_response() {
+    let response = mcp_http_response(
+        build_router(),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn mcp_rejects_null_request_id() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "method": "tools/list",
+        "params": {}
+    }))
+    .await;
+
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(
+        response["error"]["message"],
+        "JSON-RPC request id must be a string or integer"
+    );
+}
+
+#[tokio::test]
+async fn mcp_rejects_non_integer_request_id() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": 1.5,
+        "method": "tools/list",
+        "params": {}
+    }))
+    .await;
+
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(
+        response["error"]["message"],
+        "JSON-RPC request id must be a string or integer"
+    );
+}
+
+#[tokio::test]
+async fn mcp_missing_method_returns_json_rpc_invalid_request() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0"
+    }))
+    .await;
+
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(response["error"]["message"], "missing JSON-RPC method");
+}
+
 async fn mcp_request(payload: Value) -> Value {
     mcp_request_with_app(build_router(), payload).await
 }
 
 async fn mcp_request_with_app(app: axum::Router, payload: Value) -> Value {
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/mcp")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = mcp_http_response(app, payload).await;
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await
+}
+
+async fn mcp_http_response(app: axum::Router, payload: Value) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 fn tool_json_payload(result: &Value) -> Value {
@@ -369,4 +505,12 @@ fn tool_json_payload(result: &Value) -> Value {
 async fn json_body(response: axum::response::Response) -> Value {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+fn unavailable_pool() -> sqlx::PgPool {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy("postgres://agentenv:agentenv@127.0.0.1:1/agentenv")
+        .unwrap()
 }

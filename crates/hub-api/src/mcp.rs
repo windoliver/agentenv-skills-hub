@@ -1,5 +1,9 @@
 use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse, Json};
-use hub_core::validation::{validate_skill_name, validate_version};
+use hub_core::{
+    model::{CompatibilityIndex, CompatibilitySkillHit},
+    validation::{validate_skill_name, validate_version},
+};
+use hub_search::{text_embedding, SearchDocument, SemanticSearch};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -75,30 +79,92 @@ struct SuggestForTaskArgs {
     limit: Option<usize>,
 }
 
-pub async fn mcp_endpoint(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
-    let request = match serde_json::from_slice::<JsonRpcRequest>(&body) {
+pub async fn mcp_endpoint(State(state): State<AppState>, body: Bytes) -> axum::response::Response {
+    let raw_request = match serde_json::from_slice::<Value>(&body) {
         Ok(request) => request,
         Err(_) => {
             return (
                 StatusCode::OK,
                 Json(error_response(Value::Null, PARSE_ERROR, "parse error")),
-            );
+            )
+                .into_response();
+        }
+    };
+    let id_was_present = raw_request.get("id").is_some();
+    let request = match serde_json::from_value::<JsonRpcRequest>(raw_request) {
+        Ok(request) => request,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(error_response(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "invalid JSON-RPC request",
+                )),
+            )
+                .into_response();
         }
     };
 
-    let id = request.id.clone().unwrap_or(Value::Null);
+    if request.jsonrpc.as_deref() != Some(JSONRPC_VERSION) {
+        let id = request.id.clone().unwrap_or(Value::Null);
+        return (
+            StatusCode::OK,
+            Json(error_response(
+                id,
+                INVALID_REQUEST,
+                "invalid JSON-RPC request",
+            )),
+        )
+            .into_response();
+    }
+    if request.method.is_none() {
+        return (
+            StatusCode::OK,
+            Json(error_response(
+                Value::Null,
+                INVALID_REQUEST,
+                "missing JSON-RPC method",
+            )),
+        )
+            .into_response();
+    }
+
+    let id = match (id_was_present, request.id.clone()) {
+        (true, Some(id)) => match validate_request_id(id) {
+            Ok(id) => id,
+            Err(error) => {
+                return (
+                    StatusCode::OK,
+                    Json(error_response(Value::Null, error.code, error.message)),
+                )
+                    .into_response();
+            }
+        },
+        (true, None) => {
+            return (
+                StatusCode::OK,
+                Json(error_response(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "JSON-RPC request id must be a string or integer",
+                )),
+            )
+                .into_response();
+        }
+        (false, None) => return handle_notification(request).await.into_response(),
+        (false, Some(_)) => unreachable!("missing id cannot deserialize to Some"),
+    };
+
     let response = match handle_request(&state, request).await {
         Ok(result) => success_response(id, result),
         Err(error) => error_response(id, error.code, error.message),
     };
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 async fn handle_request(state: &AppState, request: JsonRpcRequest) -> Result<Value, McpError> {
-    if request.jsonrpc.as_deref() != Some(JSONRPC_VERSION) {
-        return Err(McpError::new(INVALID_REQUEST, "invalid JSON-RPC request"));
-    }
     let method = request
         .method
         .as_deref()
@@ -115,7 +181,7 @@ async fn tools_call(state: &AppState, params: Value) -> Result<Value, McpError> 
     let params = parse_params::<ToolCallParams>(params)?;
     match params.name.as_str() {
         "skills.search" => skills_search(state, params.arguments).await,
-        "skills.find_similar" => skills_find_similar(params.arguments).await,
+        "skills.find_similar" => skills_find_similar(state, params.arguments).await,
         "skills.get_manifest" => skills_get_manifest(state, params.arguments).await,
         "skills.suggest_for_task" => skills_suggest_for_task(state, params.arguments).await,
         _ => Err(McpError::new(INVALID_PARAMS, "unknown tool")),
@@ -139,13 +205,21 @@ async fn skills_search(state: &AppState, arguments: Value) -> Result<Value, McpE
     Ok(tool_json(json!({"skills": index.skills, "warnings": []})))
 }
 
-async fn skills_find_similar(arguments: Value) -> Result<Value, McpError> {
+async fn skills_find_similar(state: &AppState, arguments: Value) -> Result<Value, McpError> {
     let args = parse_params::<FindSimilarArgs>(arguments)?;
-    let _description = non_empty(args.description, "description")?;
-    let _limit = bounded_limit(args.limit)?;
-    Ok(tool_error_json(json!({
-        "error": "semantic search is not configured"
-    })))
+    let description = non_empty(args.description, "description")?;
+    let limit = bounded_limit(args.limit)?;
+    let Some(search) = &state.search else {
+        return Ok(tool_error_json(json!({
+            "error": "semantic search is not configured"
+        })));
+    };
+    let docs = search
+        .similar(&text_embedding(&description), limit as i64)
+        .await
+        .map_err(|_| McpError::new(INTERNAL_ERROR, "semantic skill search failed"))?;
+    let index = index_from_search_documents(docs);
+    Ok(tool_json(json!({"skills": index.skills, "warnings": []})))
 }
 
 async fn skills_get_manifest(state: &AppState, arguments: Value) -> Result<Value, McpError> {
@@ -179,6 +253,14 @@ async fn skills_suggest_for_task(state: &AppState, arguments: Value) -> Result<V
     let args = parse_params::<SuggestForTaskArgs>(arguments)?;
     let task_description = non_empty(args.task_description, "task_description")?;
     let limit = bounded_limit(args.limit)?;
+    if let Some(search) = &state.search {
+        let docs = search
+            .similar(&text_embedding(&task_description), limit as i64)
+            .await
+            .map_err(|_| McpError::new(INTERNAL_ERROR, "skill suggestion failed"))?;
+        let index = index_from_search_documents(docs);
+        return Ok(tool_json(json!({"skills": index.skills, "warnings": []})));
+    }
     let index = filtered_search_index(
         state,
         SearchParams {
@@ -271,11 +353,43 @@ fn tool_error_json(payload: Value) -> Value {
     })
 }
 
+async fn handle_notification(_request: JsonRpcRequest) -> StatusCode {
+    StatusCode::ACCEPTED
+}
+
 fn parse_params<T>(value: Value) -> Result<T, McpError>
 where
     T: serde::de::DeserializeOwned,
 {
     serde_json::from_value(value).map_err(|_| McpError::new(INVALID_PARAMS, "invalid params"))
+}
+
+fn validate_request_id(id: Value) -> Result<Value, McpError> {
+    match &id {
+        Value::String(_) => Ok(id),
+        Value::Number(number) if number.is_i64() || number.is_u64() => Ok(id),
+        _ => Err(McpError::new(
+            INVALID_REQUEST,
+            "JSON-RPC request id must be a string or integer",
+        )),
+    }
+}
+
+fn index_from_search_documents(docs: Vec<SearchDocument>) -> CompatibilityIndex {
+    CompatibilityIndex {
+        skills: docs
+            .into_iter()
+            .map(|doc| CompatibilitySkillHit {
+                name: doc.name,
+                version: doc.version,
+                description: doc.description,
+                registry: doc.namespace,
+                digest: None,
+                signature_ed25519: None,
+                public_key_ed25519: None,
+            })
+            .collect(),
+    }
 }
 
 fn non_empty(value: String, field: &str) -> Result<String, McpError> {

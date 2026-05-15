@@ -55,8 +55,8 @@ Read-only tools:
 | Tool | Input | Result |
 |---|---|---|
 | `skills.search` | `{ "query": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [] }` |
-| `skills.find_similar` | `{ "description": string, "limit"?: integer }` | MCP tool error: semantic search is not configured |
+| `skills.find_similar` | `{ "description": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [] }` when semantic search is configured; otherwise an MCP tool error |
 | `skills.get_manifest` | `{ "name": string, "version"?: string }` | `{ "manifest": SkillManifest }` |
-| `skills.suggest_for_task` | `{ "task_description": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [string] }` |
+| `skills.suggest_for_task` | `{ "task_description": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [string] }`; warning is present only when lexical fallback is used |
 
 The endpoint is read-only. Publishing and yanking remain REST-only.

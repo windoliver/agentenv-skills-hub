@@ -30,7 +30,7 @@ impl SemanticSearch for PgVectorSearch {
              FROM skill_embeddings se
              JOIN skills s ON s.id = se.skill_id
              JOIN skill_versions sv ON sv.id = se.version_id
-             WHERE sv.yanked_at IS NULL
+             WHERE s.visibility = 'public' AND sv.yanked_at IS NULL
              ORDER BY se.embedding <=> $1::vector
              LIMIT $2",
         )
