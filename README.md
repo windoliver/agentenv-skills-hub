@@ -8,6 +8,17 @@ The hub is a separate service from `agentenv` core. Existing `agentenv` clients 
 - `GET /skills/{name}/{version}.tar.zst`
 - `GET /skills/{name}/{version}.tar.zst.sig`
 
+The hub also exposes a read-only MCP endpoint for runtime agent discovery:
+
+- `POST /mcp`
+
+The MCP endpoint provides:
+
+- `skills.search`
+- `skills.find_similar`
+- `skills.get_manifest`
+- `skills.suggest_for_task`
+
 ## Quickstart
 
 ```bash

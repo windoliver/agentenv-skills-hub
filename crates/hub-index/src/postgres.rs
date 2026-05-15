@@ -1,8 +1,8 @@
 use hub_core::{
     error::{HubError, HubResult},
     model::{
-        CompatibilityIndex, CompatibilitySkillHit, PublishSkillRequest, SkillVersionRecord,
-        Visibility,
+        CompatibilityIndex, CompatibilitySkillHit, PublishSkillRequest, SkillManifest,
+        SkillVersionRecord, Visibility,
     },
     service::HubRepository,
 };
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 const SELECT_SKILL_VERSION: &str =
     "SELECT sv.id, s.namespace, s.name, sv.version, sv.manifest_json ->> 'description' AS description, sv.digest,
-        sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
+        sv.artifact_url, sv.artifact_media_type, sv.artifact_digest, sv.signature_ed25519,
         sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
  FROM skill_versions sv
  JOIN skills s ON s.id = sv.skill_id
@@ -45,6 +45,7 @@ impl PgHubRepository {
             serde_json::to_value(&request.manifest).map_err(|source| HubError::Database {
                 message: format!("failed to serialize manifest: {source}"),
             })?;
+        let bundle_digest = request_bundle_digest(request);
 
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         let actual_skill_id: Uuid = sqlx::query(
@@ -74,7 +75,7 @@ impl PgHubRepository {
             .map_err(db_error)?;
         if let Some(row) = conflict {
             let record = skill_version_record(row);
-            if record.digest != request.artifact.digest {
+            if record.digest != bundle_digest {
                 return Err(HubError::VersionDigestConflict {
                     namespace: namespace.to_owned(),
                     name: request.manifest.name.clone(),
@@ -87,18 +88,19 @@ impl PgHubRepository {
 
         let insert_result = sqlx::query(
             "INSERT INTO skill_versions
-             (id, skill_id, version, digest, manifest_json, artifact_url, artifact_media_type,
+             (id, skill_id, version, digest, manifest_json, artifact_url, artifact_media_type, artifact_digest,
               signature_ed25519, public_key_ed25519, sigstore_bundle_json, published_by, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (skill_id, version) DO NOTHING",
         )
         .bind(version_id)
         .bind(actual_skill_id)
         .bind(&request.manifest.version)
-        .bind(&request.artifact.digest)
+        .bind(&bundle_digest)
         .bind(manifest_json)
         .bind(&request.artifact.url)
         .bind(&request.artifact.media_type)
+        .bind(&request.artifact.digest)
         .bind(&request.signature_ed25519)
         .bind(&request.public_key_ed25519)
         .bind(&request.sigstore_bundle)
@@ -116,7 +118,7 @@ impl PgHubRepository {
                 .await
                 .map_err(db_error)?;
             let record = skill_version_record(row);
-            if record.digest != request.artifact.digest {
+            if record.digest != bundle_digest {
                 return Err(HubError::VersionDigestConflict {
                     namespace: namespace.to_owned(),
                     name: request.manifest.name.clone(),
@@ -143,9 +145,10 @@ impl PgHubRepository {
             name: request.manifest.name.clone(),
             version: request.manifest.version.clone(),
             description: request.manifest.description.clone(),
-            digest: request.artifact.digest.clone(),
+            digest: bundle_digest,
             artifact_url: request.artifact.url.clone(),
             artifact_media_type: request.artifact.media_type.clone(),
+            artifact_digest: request.artifact.digest.clone(),
             signature_ed25519: request.signature_ed25519.clone(),
             public_key_ed25519: request.public_key_ed25519.clone(),
             yanked_at: None,
@@ -257,7 +260,7 @@ impl PgHubRepository {
         let row = sqlx::query(
             "SELECT sv.id, s.namespace, s.name, sv.version, sv.manifest_json ->> 'description' AS description,
                     sv.digest, sv.artifact_url, sv.artifact_media_type, sv.signature_ed25519,
-                    sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
+                    sv.artifact_digest, sv.public_key_ed25519, sv.yanked_at, sv.yank_reason, sv.created_at
              FROM skill_versions sv
              JOIN skills s ON s.id = sv.skill_id
              WHERE s.visibility = 'public' AND sv.yanked_at IS NULL AND s.name = $1 AND sv.version = $2
@@ -276,6 +279,67 @@ impl PgHubRepository {
                 name: name.to_owned(),
                 version: version.to_owned(),
             })
+    }
+
+    pub async fn public_manifest_by_name(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> HubResult<SkillManifest> {
+        let rows = if let Some(version) = version {
+            sqlx::query(
+                "SELECT sv.version, sv.manifest_json
+                 FROM skill_versions sv
+                 JOIN skills s ON s.id = sv.skill_id
+                 WHERE s.visibility = 'public'
+                   AND sv.yanked_at IS NULL
+                   AND s.name = $1
+                   AND sv.version = $2
+                 ORDER BY s.namespace ASC
+                 LIMIT 1",
+            )
+            .bind(name)
+            .bind(version)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_error)?
+        } else {
+            sqlx::query(
+                "SELECT sv.version, sv.manifest_json
+                 FROM skill_versions sv
+                 JOIN skills s ON s.id = sv.skill_id
+                 WHERE s.visibility = 'public'
+                   AND sv.yanked_at IS NULL
+                   AND s.name = $1
+                 ORDER BY s.namespace ASC",
+            )
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_error)?
+        };
+
+        let row = rows
+            .into_iter()
+            .reduce(|selected, candidate| {
+                let selected_version: String = selected.get("version");
+                let candidate_version: String = candidate.get("version");
+                if compare_versions(&selected_version, &candidate_version).is_lt() {
+                    candidate
+                } else {
+                    selected
+                }
+            })
+            .ok_or_else(|| HubError::SkillVersionNotFound {
+                namespace: "*".to_owned(),
+                name: name.to_owned(),
+                version: version.unwrap_or("*").to_owned(),
+            })?;
+
+        let manifest_json: serde_json::Value = row.get("manifest_json");
+        serde_json::from_value(manifest_json).map_err(|source| HubError::Database {
+            message: format!("failed to deserialize manifest: {source}"),
+        })
     }
 
     pub async fn compatibility_index_for_namespace(
@@ -357,12 +421,20 @@ fn skill_version_record(row: sqlx::postgres::PgRow) -> SkillVersionRecord {
         digest: row.get("digest"),
         artifact_url: row.get("artifact_url"),
         artifact_media_type: row.get("artifact_media_type"),
+        artifact_digest: row.get("artifact_digest"),
         signature_ed25519: row.get("signature_ed25519"),
         public_key_ed25519: row.get("public_key_ed25519"),
         yanked_at: row.get("yanked_at"),
         yank_reason: row.get("yank_reason"),
         created_at: row.get("created_at"),
     }
+}
+
+fn request_bundle_digest(request: &PublishSkillRequest) -> String {
+    request
+        .bundle_digest
+        .clone()
+        .unwrap_or_else(|| request.artifact.digest.clone())
 }
 
 fn visibility_text(visibility: Visibility) -> &'static str {

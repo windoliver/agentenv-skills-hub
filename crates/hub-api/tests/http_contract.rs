@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{
     fs,
+    io::{self, Cursor},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -55,27 +56,12 @@ async fn well_known_agent_skills_returns_discovery_document() {
     let body = json_body(response).await;
     assert_eq!(body["registry"]["index"], "/index.json");
     assert_eq!(body["registry"]["api"], "/api/v1");
+    assert_eq!(body["registry"]["mcp"], "/mcp");
 }
 
 #[tokio::test]
-async fn index_json_digest_matches_served_fixture_artifact() {
+async fn index_json_digest_matches_fixture_bundle_digest() {
     let app = build_router();
-    let artifact_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/skills/code-review/1.2.0.tar.zst")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(artifact_response.status(), StatusCode::OK);
-    let artifact = to_bytes(artifact_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let digest = format!("sha256:{:x}", Sha256::digest(&artifact));
-
     let index_response = app
         .oneshot(
             Request::builder()
@@ -89,7 +75,12 @@ async fn index_json_digest_matches_served_fixture_artifact() {
     assert_eq!(index_response.status(), StatusCode::OK);
     let index: CompatibilityIndex =
         serde_json::from_value(json_body(index_response).await).unwrap();
-    assert_eq!(index.skills[0].digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(
+        index.skills[0].digest.as_deref(),
+        Some(fixture_bundle_digest().as_str())
+    );
+    assert_eq!(index.skills[0].signature_ed25519, None);
+    assert_eq!(index.skills[0].public_key_ed25519, None);
 }
 
 #[tokio::test]
@@ -99,7 +90,6 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
     let namespace = unique_name("api");
     let skill = unique_name("api-review");
     let artifact = temp_artifact(&skill);
-    let digest = file_digest(&artifact);
     let state = AppState::with_repository(
         PgHubRepository::new(pool),
         "community",
@@ -120,10 +110,11 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
             files: vec!["SKILL.md".to_owned()],
         },
         artifact: ArtifactPointer {
-            url: format!("file://{}", artifact.display()),
+            url: format!("file://{}", artifact.path.display()),
             media_type: "application/vnd.agentenv.skill.v1+tar".to_owned(),
-            digest: digest.clone(),
+            digest: artifact.artifact_digest.clone(),
         },
+        bundle_digest: None,
         signature_ed25519: None,
         public_key_ed25519: None,
         sigstore_bundle: None,
@@ -152,7 +143,10 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
         .iter()
         .find(|hit| hit.name == skill)
         .expect("published skill appears in index");
-    assert_eq!(published.digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(
+        published.digest.as_deref(),
+        Some(artifact.bundle_digest.as_str())
+    );
 
     let served_artifact = app
         .clone()
@@ -170,7 +164,7 @@ async fn publish_yank_and_unyank_update_database_backed_index() {
         .unwrap();
     assert_eq!(
         format!("sha256:{:x}", Sha256::digest(&served_bytes)),
-        digest
+        artifact.artifact_digest
     );
 
     let namespaced = compatibility_index(
@@ -281,14 +275,63 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn temp_artifact(skill: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("{skill}.tar.zst"));
-    fs::write(&path, b"api publish artifact").unwrap();
-    path
+struct SkillArtifact {
+    path: std::path::PathBuf,
+    artifact_digest: String,
+    bundle_digest: String,
 }
 
-fn file_digest(path: &Path) -> String {
-    format!("sha256:{:x}", Sha256::digest(fs::read(path).unwrap()))
+fn temp_artifact(skill: &str) -> SkillArtifact {
+    let path = std::env::temp_dir().join(format!("{skill}.tar.zst"));
+    let skill_md = format!("# {skill}\n");
+    let skill_yaml = format!(
+        "name: {skill}\nversion: 1.2.0\ndescription: API publish test\nentry: SKILL.md\nfiles:\n  - SKILL.md\n"
+    );
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        append_tar_file(&mut builder, "SKILL.md", skill_md.as_bytes());
+        append_tar_file(&mut builder, "skill.yaml", skill_yaml.as_bytes());
+        builder.finish().unwrap();
+    }
+    let bytes = zstd::stream::encode_all(Cursor::new(tar_bytes), 0).unwrap();
+    fs::write(&path, &bytes).unwrap();
+
+    SkillArtifact {
+        path,
+        artifact_digest: sha256_digest(&bytes),
+        bundle_digest: bundle_digest_for_file("SKILL.md", skill_md.as_bytes()),
+    }
+}
+
+fn append_tar_file(builder: &mut tar::Builder<&mut Vec<u8>>, path: &str, content: &[u8]) {
+    let mut header = tar::Header::new_gnu();
+    header.set_path(Path::new(path)).unwrap();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append(&header, io::Cursor::new(content)).unwrap();
+}
+
+fn sha256_digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn fixture_bundle_digest() -> String {
+    let content = include_bytes!("../../../tests/fixtures/code-review-skill/SKILL.md");
+    bundle_digest_for_file("SKILL.md", content)
+}
+
+fn bundle_digest_for_file(path: &str, content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentenv-skill-v1\n");
+    hasher.update(path.as_bytes());
+    hasher.update([0]);
+    hasher.update(content.len().to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(content);
+    hasher.update(b"\n");
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn publish_request(skill: &str, url: &str, digest: &str) -> PublishSkillRequest {
@@ -305,6 +348,7 @@ fn publish_request(skill: &str, url: &str, digest: &str) -> PublishSkillRequest 
             media_type: "application/vnd.agentenv.skill.v1+tar".to_owned(),
             digest: digest.to_owned(),
         },
+        bundle_digest: None,
         signature_ed25519: None,
         public_key_ed25519: None,
         sigstore_bundle: None,

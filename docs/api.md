@@ -39,3 +39,29 @@
 - `GET /api/v1/healthz`
 - `GET /api/v1/readyz`
 - `GET /metrics`
+
+Publish requests verify `artifact.digest` against the stored artifact bytes.
+For agentenv compatibility, the hub stores the unpacked skill bundle digest
+separately and exposes that value through `/index.json`; clients may also
+supply `bundle_digest` explicitly.
+
+## MCP
+
+- `POST /mcp`
+
+The MCP endpoint accepts JSON-RPC 2.0 HTTP requests and supports:
+
+- `initialize`
+- `tools/list`
+- `tools/call`
+
+Read-only tools:
+
+| Tool | Input | Result |
+|---|---|---|
+| `skills.search` | `{ "query": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [] }` |
+| `skills.find_similar` | `{ "description": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [] }` when semantic search is configured; otherwise an MCP tool error |
+| `skills.get_manifest` | `{ "name": string, "version"?: string }` | `{ "manifest": SkillManifest }` |
+| `skills.suggest_for_task` | `{ "task_description": string, "limit"?: integer }` | `{ "skills": [SkillSummary], "warnings": [string] }`; warning is present only when lexical fallback is used |
+
+The endpoint is read-only. Publishing and yanking remain REST-only.

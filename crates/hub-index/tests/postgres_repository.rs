@@ -34,6 +34,7 @@ fn signed_request_with_description(
             media_type: "application/vnd.agentenv.skill.v1+tar".to_owned(),
             digest: digest.to_owned(),
         },
+        bundle_digest: None,
         signature_ed25519: Some("aa".repeat(64)),
         public_key_ed25519: Some("bb".repeat(32)),
         sigstore_bundle: None,

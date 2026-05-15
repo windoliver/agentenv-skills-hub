@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     manifest_json jsonb NOT NULL,
     artifact_url text NOT NULL,
     artifact_media_type text NOT NULL,
+    artifact_digest text NOT NULL,
     signature_ed25519 text,
     public_key_ed25519 text,
     sigstore_bundle_json jsonb,
@@ -85,3 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_skill_versions_skill_version ON skill_versions(sk
 CREATE INDEX IF NOT EXISTS idx_skill_versions_yanked ON skill_versions(yanked_at);
 CREATE INDEX IF NOT EXISTS idx_skills_namespace_name ON skills(namespace, name);
 CREATE INDEX IF NOT EXISTS idx_skill_embeddings_vector ON skill_embeddings USING ivfflat (embedding vector_cosine_ops);
+
+ALTER TABLE skill_versions ADD COLUMN IF NOT EXISTS artifact_digest text;
+UPDATE skill_versions SET artifact_digest = digest WHERE artifact_digest IS NULL;
+ALTER TABLE skill_versions ALTER COLUMN artifact_digest SET NOT NULL;

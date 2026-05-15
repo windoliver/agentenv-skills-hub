@@ -1,3 +1,9 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Cursor, Read},
+    path::Path as FsPath,
+};
+
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -8,16 +14,23 @@ use hub_core::{
     auth::{can_publish, can_yank, AuthContext},
     model::{
         ArtifactPointer, CompatibilityIndex, CompatibilitySkillHit, NamespaceRole,
-        PublishSkillRequest, Visibility,
+        PublishSkillRequest, SkillManifest, Visibility,
     },
+    validation::validate_skill_path,
 };
-use hub_search::{lexical_rank, SearchDocument, SemanticSearch};
+use hub_search::SemanticSearch;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{io::Write, path::PathBuf};
 
-use crate::{error::ApiError, state::AppState};
+use crate::{
+    error::ApiError,
+    read_model::{
+        filter_index, filtered_search_index, fixture_signature, fixture_tarball_bytes,
+        index_for_state, index_for_state_and_namespace, SearchParams,
+    },
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct PublishQuery {
@@ -58,7 +71,8 @@ pub async fn well_known_agent_skills() -> Json<serde_json::Value> {
         "registry": {
             "type": "agentenv-skills-hub",
             "index": "/index.json",
-            "api": "/api/v1"
+            "api": "/api/v1",
+            "mcp": "/mcp"
         }
     }))
 }
@@ -73,7 +87,16 @@ pub async fn list_skills(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    filtered_search_index(&state, query).await.map(Json)
+    filtered_search_index(
+        &state,
+        SearchParams {
+            query: query.q.or(query.query),
+            namespace: query.namespace,
+            limit: query.limit,
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub async fn get_skill(
@@ -135,6 +158,21 @@ pub async fn publish_version(
         .service
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("hub repository is not configured"))?;
+    let artifact_bytes = state
+        .artifact_store
+        .fetch_verified(&request.artifact)
+        .await?;
+    let derived_bundle_digest =
+        bundle_digest_from_tar_zst(artifact_bytes.as_ref(), &request.manifest)?;
+    if let Some(provided_bundle_digest) = request.bundle_digest.as_deref() {
+        if provided_bundle_digest != derived_bundle_digest {
+            return Err(ApiError::bad_request(format!(
+                "bundle digest mismatch: expected `{provided_bundle_digest}`, found `{derived_bundle_digest}`"
+            )));
+        }
+    }
+    let mut request = request;
+    request.bundle_digest = Some(derived_bundle_digest);
     let record = service
         .publish(
             &auth,
@@ -190,7 +228,16 @@ pub async fn search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<CompatibilityIndex>, ApiError> {
-    filtered_search_index(&state, query).await.map(Json)
+    filtered_search_index(
+        &state,
+        SearchParams {
+            query: query.q.or(query.query),
+            namespace: query.namespace,
+            limit: query.limit,
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub async fn similar_search(
@@ -220,43 +267,6 @@ pub async fn similar_search(
             })
             .collect(),
     }))
-}
-
-async fn filtered_search_index(
-    state: &AppState,
-    query: SearchQuery,
-) -> Result<CompatibilityIndex, ApiError> {
-    let mut index = index_for_state_and_namespace(state, query.namespace.as_deref()).await?;
-    let limit = query.limit;
-    let Some(search_terms) = query.q.or(query.query) else {
-        truncate_index(&mut index, limit);
-        return Ok(index);
-    };
-    let docs = index
-        .skills
-        .iter()
-        .map(|hit| SearchDocument {
-            namespace: hit.registry.clone(),
-            name: hit.name.clone(),
-            version: hit.version.clone(),
-            description: hit.description.clone(),
-        })
-        .collect();
-    let ranked = lexical_rank(&search_terms, docs);
-    let mut skills = ranked
-        .into_iter()
-        .filter_map(|doc| {
-            index
-                .skills
-                .iter()
-                .find(|hit| hit.name == doc.name && hit.version == doc.version)
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    if let Some(limit) = limit {
-        skills.truncate(limit);
-    }
-    Ok(CompatibilityIndex { skills })
 }
 
 pub async fn list_webhooks() -> Json<serde_json::Value> {
@@ -312,7 +322,7 @@ async fn db_artifact_response(
         .fetch_verified(&ArtifactPointer {
             url: record.artifact_url,
             media_type: record.artifact_media_type.clone(),
-            digest: record.digest,
+            digest: record.artifact_digest,
         })
         .await?;
     Ok((
@@ -333,106 +343,98 @@ fn artifact_version(artifact: &str) -> Option<(&str, bool)> {
         })
 }
 
+fn bundle_digest_from_tar_zst(bytes: &[u8], manifest: &SkillManifest) -> Result<String, ApiError> {
+    let tar_bytes = zstd::stream::decode_all(Cursor::new(bytes)).map_err(|source| {
+        ApiError::bad_request(format!(
+            "skill artifact is not a valid zstd tarball: {source}"
+        ))
+    })?;
+    let wanted_paths = manifest
+        .files
+        .iter()
+        .map(|path| canonical_skill_path(path))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut file_bytes = BTreeMap::new();
+    let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
+    for entry in archive.entries().map_err(|source| {
+        ApiError::bad_request(format!(
+            "failed to read skill artifact tar entries: {source}"
+        ))
+    })? {
+        let mut entry = entry.map_err(|source| {
+            ApiError::bad_request(format!("failed to read skill artifact tar entry: {source}"))
+        })?;
+        let entry_path = entry.path().map_err(|source| {
+            ApiError::bad_request(format!("failed to read skill artifact tar path: {source}"))
+        })?;
+        let entry_path = canonical_archive_path(&entry_path)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(ApiError::bad_request(format!(
+                "skill artifact contains unsupported tar entry `{entry_path}`"
+            )));
+        }
+        if wanted_paths.contains(&entry_path) {
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).map_err(|source| {
+                ApiError::bad_request(format!(
+                    "failed to read skill artifact file `{entry_path}`: {source}"
+                ))
+            })?;
+            file_bytes.insert(entry_path, content);
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentenv-skill-v1\n");
+    for path in wanted_paths {
+        let content = file_bytes.get(&path).ok_or_else(|| {
+            ApiError::bad_request(format!("skill artifact is missing declared file `{path}`"))
+        })?;
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(content.len().to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(content);
+        hasher.update(b"\n");
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn canonical_archive_path(path: &FsPath) -> Result<String, ApiError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| ApiError::bad_request("skill artifact contains a non-UTF-8 tar path"))?;
+    canonical_skill_path(path)
+}
+
+fn canonical_skill_path(path: &str) -> Result<String, ApiError> {
+    let path = validate_skill_path(path)?;
+    canonical_path_string(&path)
+}
+
+fn canonical_path_string(path: &FsPath) -> Result<String, ApiError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(ApiError::bad_request(format!(
+                "unsafe skill path `{}`",
+                path.display()
+            )));
+        };
+        let part = part.to_str().ok_or_else(|| {
+            ApiError::bad_request(format!("skill path `{}` is not UTF-8", path.display()))
+        })?;
+        parts.push(part);
+    }
+    Ok(parts.join("/"))
+}
+
 pub async fn metrics() -> &'static str {
     "# HELP agentenv_skills_hub_info Skill hub info\n# TYPE agentenv_skills_hub_info gauge\nagentenv_skills_hub_info 1\n"
-}
-
-async fn index_for_state(state: &AppState) -> Result<CompatibilityIndex, ApiError> {
-    index_for_state_and_namespace(state, None).await
-}
-
-async fn index_for_state_and_namespace(
-    state: &AppState,
-    namespace: Option<&str>,
-) -> Result<CompatibilityIndex, ApiError> {
-    if let Some(repository) = &state.repository {
-        if let Some(namespace) = namespace {
-            return Ok(repository
-                .compatibility_index_for_namespace(namespace)
-                .await?);
-        }
-        return Ok(repository.compatibility_index(&state.registry).await?);
-    }
-    let index = fixture_index(&state.registry)?;
-    if let Some(namespace) = namespace {
-        return Ok(filter_index(index, |hit| hit.registry == namespace));
-    }
-    Ok(index)
-}
-
-fn fixture_index(registry: &str) -> Result<CompatibilityIndex, ApiError> {
-    Ok(CompatibilityIndex {
-        skills: vec![CompatibilitySkillHit {
-            name: "code-review".to_owned(),
-            version: "1.2.0".to_owned(),
-            description: Some("Review code changes".to_owned()),
-            registry: registry.to_owned(),
-            digest: Some(sha256_digest(&fixture_tarball_bytes()?)),
-            signature_ed25519: Some(fixture_signature().trim().to_owned()),
-            public_key_ed25519: Some("bb".repeat(32)),
-        }],
-    })
-}
-
-fn filter_index(
-    index: CompatibilityIndex,
-    predicate: impl Fn(&CompatibilitySkillHit) -> bool,
-) -> CompatibilityIndex {
-    CompatibilityIndex {
-        skills: index.skills.into_iter().filter(predicate).collect(),
-    }
-}
-
-fn truncate_index(index: &mut CompatibilityIndex, limit: Option<usize>) {
-    if let Some(limit) = limit {
-        index.skills.truncate(limit);
-    }
-}
-
-fn fixture_tarball_bytes() -> Result<Vec<u8>, ApiError> {
-    let mut tar_bytes = Vec::new();
-    {
-        let encoder = zstd::stream::write::Encoder::new(&mut tar_bytes, 0).map_err(|source| {
-            ApiError::internal(format!("failed to create zstd encoder: {source}"))
-        })?;
-        let mut builder = tar::Builder::new(encoder);
-        append_bytes(
-            &mut builder,
-            "skill.yaml",
-            include_bytes!("../../../tests/fixtures/code-review-skill/skill.yaml"),
-        )?;
-        append_bytes(
-            &mut builder,
-            "SKILL.md",
-            include_bytes!("../../../tests/fixtures/code-review-skill/SKILL.md"),
-        )?;
-        let encoder = builder
-            .into_inner()
-            .map_err(|source| ApiError::internal(format!("failed to finish tar: {source}")))?;
-        encoder
-            .finish()
-            .map_err(|source| ApiError::internal(format!("failed to finish zstd: {source}")))?;
-    }
-
-    Ok(tar_bytes)
-}
-
-fn fixture_signature() -> &'static str {
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-}
-
-fn append_bytes<W: Write>(
-    builder: &mut tar::Builder<W>,
-    path: &str,
-    bytes: &[u8],
-) -> Result<(), ApiError> {
-    let mut header = tar::Header::new_gnu();
-    header.set_size(bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, PathBuf::from(path), bytes)
-        .map_err(|source| ApiError::internal(format!("failed to append fixture file: {source}")))
 }
 
 fn auth_from_headers(headers: &HeaderMap) -> Result<AuthContext, ApiError> {
@@ -485,8 +487,4 @@ fn parse_role(value: &str) -> Result<(String, NamespaceRole), ApiError> {
         }
     };
     Ok((namespace.to_owned(), role))
-}
-
-fn sha256_digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
 }
