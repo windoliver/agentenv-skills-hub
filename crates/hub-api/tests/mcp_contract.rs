@@ -192,6 +192,52 @@ async fn mcp_get_manifest_internal_lookup_failure_returns_json_rpc_error() {
     assert!(response.get("result").is_none());
 }
 
+#[tokio::test]
+async fn mcp_find_similar_reports_semantic_unavailable_without_backend() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "similar",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.find_similar",
+            "arguments": {
+                "description": "Review code changes and produce actionable comments",
+                "limit": 5
+            }
+        }
+    }))
+    .await;
+
+    assert_eq!(response["result"]["isError"], true);
+    let payload = tool_json_payload(&response["result"]);
+    assert_eq!(payload["error"], "semantic search is not configured");
+}
+
+#[tokio::test]
+async fn mcp_suggest_for_task_falls_back_to_lexical_search_with_warning() {
+    let response = mcp_request(json!({
+        "jsonrpc": "2.0",
+        "id": "suggest",
+        "method": "tools/call",
+        "params": {
+            "name": "skills.suggest_for_task",
+            "arguments": {
+                "task_description": "review code changes",
+                "limit": 5
+            }
+        }
+    }))
+    .await;
+
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_json_payload(&response["result"]);
+    assert_eq!(payload["skills"][0]["name"], "code-review");
+    assert_eq!(
+        payload["warnings"],
+        json!(["semantic search is not configured; used lexical fallback"])
+    );
+}
+
 async fn mcp_request(payload: Value) -> Value {
     mcp_request_with_app(build_router(), payload).await
 }

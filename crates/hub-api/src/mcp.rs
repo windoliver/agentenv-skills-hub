@@ -58,9 +58,21 @@ struct SearchArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct FindSimilarArgs {
+    description: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GetManifestArgs {
     name: String,
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SuggestForTaskArgs {
+    task_description: String,
+    limit: Option<usize>,
 }
 
 pub async fn mcp_endpoint(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
@@ -103,13 +115,9 @@ async fn tools_call(state: &AppState, params: Value) -> Result<Value, McpError> 
     let params = parse_params::<ToolCallParams>(params)?;
     match params.name.as_str() {
         "skills.search" => skills_search(state, params.arguments).await,
-        "skills.find_similar" => Ok(tool_error_json(json!({
-            "error": "semantic search is not configured"
-        }))),
+        "skills.find_similar" => skills_find_similar(params.arguments).await,
         "skills.get_manifest" => skills_get_manifest(state, params.arguments).await,
-        "skills.suggest_for_task" => Ok(tool_error_json(json!({
-            "error": "semantic search is not configured"
-        }))),
+        "skills.suggest_for_task" => skills_suggest_for_task(state, params.arguments).await,
         _ => Err(McpError::new(INVALID_PARAMS, "unknown tool")),
     }
 }
@@ -129,6 +137,15 @@ async fn skills_search(state: &AppState, arguments: Value) -> Result<Value, McpE
     .await
     .map_err(|_| McpError::new(INTERNAL_ERROR, "skill search failed"))?;
     Ok(tool_json(json!({"skills": index.skills, "warnings": []})))
+}
+
+async fn skills_find_similar(arguments: Value) -> Result<Value, McpError> {
+    let args = parse_params::<FindSimilarArgs>(arguments)?;
+    let _description = non_empty(args.description, "description")?;
+    let _limit = bounded_limit(args.limit)?;
+    Ok(tool_error_json(json!({
+        "error": "semantic search is not configured"
+    })))
 }
 
 async fn skills_get_manifest(state: &AppState, arguments: Value) -> Result<Value, McpError> {
@@ -156,6 +173,26 @@ async fn skills_get_manifest(state: &AppState, arguments: Value) -> Result<Value
             "skill manifest lookup failed",
         )),
     }
+}
+
+async fn skills_suggest_for_task(state: &AppState, arguments: Value) -> Result<Value, McpError> {
+    let args = parse_params::<SuggestForTaskArgs>(arguments)?;
+    let task_description = non_empty(args.task_description, "task_description")?;
+    let limit = bounded_limit(args.limit)?;
+    let index = filtered_search_index(
+        state,
+        SearchParams {
+            query: Some(task_description),
+            namespace: None,
+            limit: Some(limit),
+        },
+    )
+    .await
+    .map_err(|_| McpError::new(INTERNAL_ERROR, "skill suggestion failed"))?;
+    Ok(tool_json(json!({
+        "skills": index.skills,
+        "warnings": ["semantic search is not configured; used lexical fallback"]
+    })))
 }
 
 fn initialize_result() -> Value {
