@@ -335,3 +335,25 @@ impl McpError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{bounded_limit, INVALID_PARAMS};
+
+    #[test]
+    fn bounded_limit_clamps_large_values() {
+        assert_eq!(bounded_limit(Some(500)).unwrap(), 50);
+    }
+
+    #[test]
+    fn bounded_limit_uses_default_when_omitted() {
+        assert_eq!(bounded_limit(None).unwrap(), 20);
+    }
+
+    #[test]
+    fn bounded_limit_rejects_zero() {
+        let error = bounded_limit(Some(0)).unwrap_err();
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert_eq!(error.message, "`limit` must be greater than zero");
+    }
+}

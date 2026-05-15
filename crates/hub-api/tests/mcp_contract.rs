@@ -315,6 +315,7 @@ async fn mcp_clamps_large_search_limit() {
     }))
     .await;
 
+    assert_eq!(response["result"]["isError"], false);
     let payload = tool_json_payload(&response["result"]);
     assert_eq!(payload["skills"].as_array().unwrap().len(), 1);
 }
